@@ -118,6 +118,86 @@ struct InputParityTests {
         #expect(ElementClickFallbackPolicy.center(of: outside, within: bounds) == nil)
     }
 
+    @Test func dragRunnerValidatesImmediatelyBeforeEveryPostedEvent() throws {
+        let start = Point(x: 10, y: 20)
+        let middle = Point(x: 20, y: 30)
+        let end = Point(x: 30, y: 40)
+        let fixture = DragRunnerFixture()
+
+        try DeterministicDragRunner.run(
+            points: [start, middle, end],
+            duration: 0,
+            cancellation: NeverCanceled(),
+            validateDestination: fixture.validate
+        ) { kind, point in
+            try fixture.emit(kind, at: point)
+        }
+
+        #expect(fixture.trace == [
+            .validate(start), .emit(.down, start),
+            .validate(middle), .emit(.move, middle),
+            .validate(end), .emit(.move, end),
+            .validate(end), .emit(.up, end),
+        ])
+    }
+
+    @Test func dragRunnerAbortsOnLiveDestinationChangeAndBalancesMouseUp() throws {
+        let start = Point(x: 10, y: 20)
+        let acceptedMove = Point(x: 20, y: 30)
+        let blockedMove = Point(x: 30, y: 40)
+        let fixture = DragRunnerFixture(failOnValidationNumber: 3)
+
+        do {
+            try DeterministicDragRunner.run(
+                points: [start, acceptedMove, blockedMove],
+                duration: 0,
+                cancellation: NeverCanceled(),
+                validateDestination: fixture.validate
+            ) { kind, point in
+                try fixture.emit(kind, at: point)
+            }
+            Issue.record("Drag unexpectedly continued into a changed destination")
+        } catch {
+            #expect(error as? SyntheticDestinationGuardError == .unrelatedOccluder)
+        }
+
+        #expect(fixture.trace == [
+            .validate(start), .emit(.down, start),
+            .validate(acceptedMove), .emit(.move, acceptedMove),
+            .validate(blockedMove),
+            .emit(.up, acceptedMove),
+        ])
+    }
+
+    @Test func dragRunnerCancellationAfterMouseDownStillBalancesMouseUp() throws {
+        let start = Point(x: 10, y: 20)
+        let acceptedMove = Point(x: 20, y: 30)
+        let canceledMove = Point(x: 30, y: 40)
+        let fixture = DragRunnerFixture()
+        let cancellation = ToggleCancellationFixture()
+
+        do {
+            try DeterministicDragRunner.run(
+                points: [start, acceptedMove, canceledMove],
+                duration: 0,
+                cancellation: cancellation,
+                validateDestination: fixture.validate
+            ) { kind, point in
+                try fixture.emit(kind, at: point)
+                if kind == .move { cancellation.cancel() }
+            }
+            Issue.record("Canceled drag unexpectedly completed")
+        } catch {
+            #expect(error as? InputDriverError == .canceled)
+        }
+
+        #expect(fixture.trace == [
+            .validate(start), .emit(.down, start),
+            .validate(acceptedMove), .emit(.move, acceptedMove),
+            .emit(.up, acceptedMove),
+        ])
+    }
+
     private func pressKeyRequest(_ key: String) throws -> HostActionRequest {
         try JSONValue.object([
             "kind": .string("pressKey"),
@@ -145,5 +225,45 @@ struct InputParityTests {
             identifier: "continue-button",
             semanticContext: semanticContext
         )
+    }
+}
+
+private enum DragTraceEntry: Equatable {
+    case validate(Point)
+    case emit(SyntheticDragEventKind, Point)
+}
+
+private final class DragRunnerFixture: @unchecked Sendable {
+    private let failOnValidationNumber: Int?
+    private var validationCount = 0
+    var trace: [DragTraceEntry] = []
+
+    init(failOnValidationNumber: Int? = nil) {
+        self.failOnValidationNumber = failOnValidationNumber
+    }
+
+    func validate(_ point: Point) throws {
+        validationCount += 1
+        trace.append(.validate(point))
+        if validationCount == failOnValidationNumber {
+            throw SyntheticDestinationGuardError.unrelatedOccluder
+        }
+    }
+
+    func emit(_ kind: SyntheticDragEventKind, at point: Point) throws {
+        trace.append(.emit(kind, point))
+    }
+}
+
+private final class ToggleCancellationFixture: InteractionCancellationChecking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var canceled = false
+
+    func cancel() {
+        lock.withLock { canceled = true }
+    }
+
+    func check() throws {
+        if lock.withLock({ canceled }) { throw InputDriverError.canceled }
     }
 }

@@ -841,6 +841,11 @@ public actor HostController: HostMethodHandling {
                 !application.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                 !application.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }.map { application in
+            // Without a verified GUI ancestor, the bridge cannot prove which
+            // application belongs to the requesting harness. Inventory stays
+            // readable, but every candidate must remain non-grantable so
+            // self-control cannot fail open.
+            let canExcludeRequestingHarness = context.connection.peer.captureExclusion != nil
             let isRequestingHarness = context.connection.peer.matchesHarnessApplication(
                 bundleIdentifier: application.bundleIdentifier
             )
@@ -854,7 +859,10 @@ public actor HostController: HostMethodHandling {
                 "pid": .number(Double(application.processID)),
                 "windowCount": .number(Double(application.windows.count)),
                 "grantable": .bool(
-                    !application.isProtected && !isRequestingHarness && hasGrantableWindow
+                    canExcludeRequestingHarness &&
+                        !application.isProtected &&
+                        !isRequestingHarness &&
+                        hasGrantableWindow
                 ),
             ])
         }
@@ -886,6 +894,18 @@ public actor HostController: HostMethodHandling {
                 code: "ACCESS_DENIED",
                 message: "interact requires observe; clipboard_write requires observe and interact"
             )
+        }
+        // Window and display grants must exclude the requesting GUI itself.
+        // If the signed bridge cannot derive and bind that ancestor, there is
+        // no safe target set to present. Keep diagnostics available, but deny
+        // all authority creation for this connection.
+        guard context.connection.peer.captureExclusion != nil else {
+            return .object([
+                "status": .string("denied"),
+                "message": .string(
+                    "The requesting application identity could not be verified; restart the MCP client from its signed macOS application before requesting control"
+                ),
+            ])
         }
         let requestedDisplayTarget: Bool = {
             if case .display = request.target { return true }
@@ -1565,12 +1585,24 @@ public actor HostController: HostMethodHandling {
                         )
                         throw error
                     }
-                    guard await risks.resolve(
+                    let resolution = await risks.resolve(
                         challengeID: challenge.id,
                         connectionID: context.connection.id,
                         approved: approved,
                         approvalMode: .native
-                    ) else {
+                    )
+                    switch resolution {
+                    case let .resolved(disposition, consumed):
+                        guard !consumed else {
+                            throw WireError(code: "APPROVAL_USED", message: "The native approval token was already consumed")
+                        }
+                        let expected: RiskApprovalDisposition = approved ? .approved : .denied
+                        guard disposition == expected else {
+                            throw WireError(code: "APPROVAL_MISMATCH", message: "Approval decision changed for this challenge")
+                        }
+                    case .decisionMismatch:
+                        throw WireError(code: "APPROVAL_MISMATCH", message: "Approval decision changed for this challenge")
+                    case .unavailable:
                         throw WireError(code: "APPROVAL_EXPIRED", message: "The approval challenge expired before a decision")
                     }
                     if !approved {
@@ -1660,16 +1692,27 @@ public actor HostController: HostMethodHandling {
 
     private func approveRisk(_ value: JSONValue, _ context: HostRequestContext) async throws -> JSONValue {
         let request = try value.decode(ApproveRiskParameters.self)
-        guard await risks.resolve(
+        let resolution = await risks.resolve(
             challengeID: request.approvalRequestID,
             connectionID: context.connection.id,
             approved: request.approved,
             approvalMode: .elicitation
-        ) else { throw WireError(code: "approval_not_found", message: "Approval request is missing or expired") }
+        )
+        let disposition: RiskApprovalDisposition
+        let consumed: Bool
+        switch resolution {
+        case let .resolved(resolvedDisposition, wasConsumed):
+            disposition = resolvedDisposition
+            consumed = wasConsumed
+        case .decisionMismatch:
+            throw WireError(code: "APPROVAL_MISMATCH", message: "Approval decision changed for this challenge")
+        case .unavailable:
+            throw WireError(code: "approval_not_found", message: "Approval request is missing or expired")
+        }
         return .object([
             "approvalRequestId": .string(request.approvalRequestID.uuidString),
-            "disposition": .string(request.approved ? "approved" : "denied"),
-            "consumed": .bool(false),
+            "disposition": .string(disposition.rawValue),
+            "consumed": .bool(consumed),
         ])
     }
 
@@ -1811,13 +1854,29 @@ public actor HostController: HostMethodHandling {
                     requireWholeTarget: false,
                     excludingProcess: context.connection.peer.captureExclusion
                 )
+                let dragScope = grant.scope
+                let excludedProcess = context.connection.peer.captureExclusion
+                let validateDragDestination: @Sendable (Point) throws -> Void = { point in
+                    // Re-read the live WindowServer stack at every event
+                    // boundary. In window scope this binds the entire drag to
+                    // the exact grant even if another surface appears after
+                    // mouse-down; display scope applies its protected/self
+                    // destination policy to the current point as well.
+                    try destinationGuard.validate(
+                        scope: dragScope,
+                        globalPoints: [point],
+                        requireWholeTarget: false,
+                        excludingProcess: excludedProcess
+                    )
+                }
                 try await Task.detached {
                     try input.drag(
                         from: globalFrom,
                         to: globalTo,
                         button: .left,
                         duration: duration,
-                        cancellation: cancellation
+                        cancellation: cancellation,
+                        validateDestination: validateDragDestination
                     )
                 }.value
             case .scroll:

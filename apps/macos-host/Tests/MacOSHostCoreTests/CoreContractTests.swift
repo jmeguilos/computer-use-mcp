@@ -74,6 +74,24 @@ private func makeWindow(
     )
 }
 
+private func verifiedTestHarnessPeer(
+    processID: Int32 = 9_900,
+    name: String = "verified-test-harness",
+    instanceID: String = "verified-test-harness"
+) -> PeerIdentity {
+    PeerIdentity(
+        uid: UInt32(getuid()),
+        processID: processID,
+        name: name,
+        instanceID: instanceID,
+        harnessProcessID: 90_001,
+        harnessBundleIdentifier: "com.example.computer-use-mcp-test-harness",
+        harnessSigningIdentity: String(repeating: "f", count: 64),
+        harnessProcessStartTimeUnixMs: 1_700_000_001_000,
+        harnessIdentityVerified: true
+    )
+}
+
 private func accessRequestParameters(bundleIdentifier: String) -> JSONValue {
     .object([
         "target": .object([
@@ -664,6 +682,74 @@ struct GrantFrameTransformTests {
         #expect(release.objectValue?["status"] == .string("not_found"))
     }
 
+    @Test func unverifiedHarnessCannotRequestWindowOrDisplayAuthority() async throws {
+        let window = try makeWindow(bundle: "com.example.identity-gated-target")
+        let application = ApplicationDescriptor(
+            bundleIdentifier: window.identity.bundleIdentifier,
+            name: "Identity Gated Target",
+            processID: window.identity.processID,
+            windows: [window],
+            isProtected: false
+        )
+        let capture = ProgressiveCaptureServiceFixture(
+            application: application,
+            visibleAfterInventoryCall: 1
+        )
+        let presenter = LaunchDenyingPresenterFixture()
+        let controller = HostController(
+            capture: capture,
+            accessibility: GrantingAccessibilityFixture(),
+            permissions: GrantedPermissionFixture(),
+            accessPresenter: presenter
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "u", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()),
+                processID: 9_800,
+                name: "unverified-test-harness",
+                instanceID: "unverified-test-harness"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        let context = HostRequestContext(
+            requestID: "unverified-access",
+            connection: connection,
+            deadline: now.addingTimeInterval(5)
+        )
+        let displayRequest: JSONValue = .object([
+            "target": .object([
+                "kind": .string("display"),
+                "displayId": .string("display-42"),
+            ]),
+            "reason": .string("Exercise the unverified display boundary"),
+            "capabilities": .array([.string("observe")]),
+            "timeoutMs": .number(5_000),
+        ])
+
+        for request in [
+            accessRequestParameters(bundleIdentifier: window.identity.bundleIdentifier),
+            displayRequest,
+        ] {
+            let result = try await controller.handle(
+                method: "requestAccess",
+                params: request,
+                context: context
+            )
+            #expect(result.objectValue?["status"] == .string("denied"))
+            #expect(result.objectValue?["message"]?.stringValue?.contains("could not be verified") == true)
+        }
+
+        #expect(presenter.accessRequestCount == 0)
+        #expect(await capture.inventoryCallCount() == 0)
+        #expect(await controller.activeGrantCount() == 0)
+    }
+
     @Test func absentApplicationLaunchRequiresSeparateConsentBeforeMutation() async throws {
         let capture = EmptyCaptureServiceFixture()
         let presenter = LaunchDenyingPresenterFixture()
@@ -676,7 +762,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -713,7 +799,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -767,7 +853,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -829,7 +915,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -884,7 +970,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -929,7 +1015,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -968,7 +1054,7 @@ struct GrantFrameTransformTests {
         let now = Date()
         let connection = ConnectionRecord(
             id: UUID(), capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            peer: verifiedTestHarnessPeer(processID: 777, name: "fixture-harness", instanceID: "fixture"),
             capabilities: Set(HostCapability.allCases), openedAt: now,
             lastActivityAt: now, idleTimeout: 900
         )
@@ -1165,6 +1251,16 @@ struct GrantFrameTransformTests {
         )
         #expect(verifiedResult == expected(grantable: false))
 
+        let verifiedOtherHarnessResult = try await controller.handle(
+            method: "listApps",
+            params: .object([:]),
+            context: context(
+                peer: verifiedTestHarnessPeer(),
+                requestID: "verified-other-harness-inventory"
+            )
+        )
+        #expect(verifiedOtherHarnessResult == expected(grantable: true))
+
         let unverifiedResult = try await controller.handle(
             method: "listApps",
             params: .object([:]),
@@ -1178,7 +1274,7 @@ struct GrantFrameTransformTests {
                 requestID: "ordinary-client-inventory"
             )
         )
-        #expect(unverifiedResult == expected(grantable: true))
+        #expect(unverifiedResult == expected(grantable: false))
     }
 
     @Test func listAppsRequiresAtLeastOneIndividuallyPolicyAllowedWindow() async throws {
@@ -1197,8 +1293,7 @@ struct GrantFrameTransformTests {
         let connection = ConnectionRecord(
             id: UUID(),
             capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(
-                uid: UInt32(getuid()),
+            peer: verifiedTestHarnessPeer(
                 processID: 9_003,
                 name: "ordinary-client",
                 instanceID: "ordinary-client"
@@ -1908,6 +2003,41 @@ struct PrivacyAndPolicyTests {
         #expect(guarder.blockingProtectedOverlay(targetIndex: 1, stack: [protectedOverlay, target]))
     }
 
+    @Test func elevatedOrdinaryWindowFromSameAppBlocksOnlyAboveTargetAtActionPoint() {
+        let guarder = SyntheticDestinationGuard()
+        let elevatedSibling = WindowStackEntry(
+            windowID: 701, processID: 777, bundleIdentifier: "com.example.safe",
+            processName: "Safe", title: "Popover", frame: Rect(
+                origin: Point(x: 140, y: 140), size: Size(width: 300, height: 200)
+            ), layer: 25, alpha: 1
+        )
+        let exactTarget = WindowStackEntry(
+            windowID: 700, processID: 777, bundleIdentifier: "com.example.safe",
+            processName: "Safe", title: "Granted window", frame: Rect(
+                origin: Point(x: 120, y: 120), size: Size(width: 720, height: 520)
+            ), layer: 0, alpha: 1
+        )
+
+        #expect(guarder.blockingOccluder(
+            targetIndex: 1,
+            stack: [elevatedSibling, exactTarget],
+            globalPoints: [Point(x: 200, y: 200)],
+            requireWholeTarget: false
+        ) == .unrelatedOccluder)
+        #expect(guarder.blockingOccluder(
+            targetIndex: 1,
+            stack: [elevatedSibling, exactTarget],
+            globalPoints: [Point(x: 600, y: 500)],
+            requireWholeTarget: false
+        ) == nil)
+        #expect(guarder.blockingOccluder(
+            targetIndex: 0,
+            stack: [exactTarget, elevatedSibling],
+            globalPoints: [Point(x: 200, y: 200)],
+            requireWholeTarget: false
+        ) == nil)
+    }
+
     @Test func displayInputCannotTargetTheRequestingHarnessByPointOrFocus() throws {
         let guarder = SyntheticDestinationGuard()
         let display = try makeDisplay(
@@ -1985,7 +2115,7 @@ struct InteractionSafetyTests {
             challengeID: approvedChallenge.id,
             connectionID: connection,
             approved: true
-        ))
+        ) == .resolved(disposition: .approved, consumed: false))
         _ = await store.authorize(
             connectionID: connection,
             requestID: "pending",
@@ -2020,7 +2150,7 @@ struct InteractionSafetyTests {
             connectionID: connection,
             approved: true,
             now: Date(timeIntervalSince1970: 101)
-        ))
+        ) == .resolved(disposition: .approved, consumed: false))
         #expect(!(await store.consumeApproved(
             approvalRequestID: challenge.id,
             connectionID: connection,
@@ -2048,12 +2178,12 @@ struct InteractionSafetyTests {
             now: Date(timeIntervalSince1970: 200)
         )
         if case .challenge(let expired) = expiredAuthorization {
-            #expect(!(await store.resolve(
+            #expect(await store.resolve(
                 challengeID: expired.id,
                 connectionID: connection,
                 approved: true,
                 now: Date(timeIntervalSince1970: 231)
-            )))
+            ) == .unavailable)
         } else { Issue.record("expected expiring challenge") }
 
         let nativeAuthorization = await store.authorize(
@@ -2065,14 +2195,85 @@ struct InteractionSafetyTests {
             now: Date(timeIntervalSince1970: 300)
         )
         if case .challenge(let nativeChallenge) = nativeAuthorization {
-            #expect(!(await store.resolve(
+            #expect(await store.resolve(
                 challengeID: nativeChallenge.id,
                 connectionID: connection,
                 approved: true,
                 approvalMode: .elicitation,
                 now: Date(timeIntervalSince1970: 301)
-            )))
+            ) == .unavailable)
         } else { Issue.record("expected native-route challenge") }
+    }
+
+    @Test func riskResolutionRetryIsConcurrentIdempotentAndActionTokenStaysOneShot() async {
+        let store = RiskApprovalStore(challengeLifetime: 30)
+        let connection = UUID()
+        let authorization = await store.authorize(
+            connectionID: connection,
+            requestID: "response-loss",
+            actionDigest: "exact-digest",
+            tier: .high,
+            now: Date(timeIntervalSince1970: 100)
+        )
+        guard case .challenge(let challenge) = authorization else {
+            Issue.record("high-risk fixture did not create a challenge")
+            return
+        }
+
+        let results = await withTaskGroup(of: RiskApprovalResolutionResult.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await store.resolve(
+                        challengeID: challenge.id,
+                        connectionID: connection,
+                        approved: true,
+                        now: Date(timeIntervalSince1970: 101)
+                    )
+                }
+            }
+            var values: [RiskApprovalResolutionResult] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        #expect(results.count == 8)
+        #expect(results.allSatisfy {
+            $0 == .resolved(disposition: .approved, consumed: false)
+        })
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: connection,
+            approved: false,
+            now: Date(timeIntervalSince1970: 102)
+        ) == .decisionMismatch)
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: UUID(),
+            approved: true,
+            now: Date(timeIntervalSince1970: 102)
+        ) == .unavailable)
+
+        let consumptions = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await store.consumeApproved(
+                        approvalRequestID: challenge.id,
+                        connectionID: connection,
+                        actionDigest: "exact-digest",
+                        now: Date(timeIntervalSince1970: 103)
+                    )
+                }
+            }
+            var values: [Bool] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        #expect(consumptions.filter { $0 }.count == 1)
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: connection,
+            approved: true,
+            now: Date(timeIntervalSince1970: 104)
+        ) == .resolved(disposition: .approved, consumed: true))
     }
 
     @Test func nativeActionBoundsRejectOverflowAndNegativeInputsBeforeDispatch() throws {
@@ -2190,6 +2391,66 @@ struct InteractionSafetyTests {
         #expect(throws: InteractionSafetyError.clipboardChangedExternally) {
             try controller.withTemporaryText("secret") { 1 }
         }
+    }
+
+    @Test func clipboardStagingFailureRestoresEveryPriorItemAndRepresentation() throws {
+        let originalItems = [
+            PasteboardItemSnapshot(values: [
+                "public.utf8-plain-text": Data("original text".utf8),
+                "public.html": Data("<b>original text</b>".utf8),
+            ]),
+            PasteboardItemSnapshot(values: [
+                "public.url": Data("https://example.invalid/original".utf8),
+                "public.file-url": Data("file:///tmp/original".utf8),
+            ]),
+        ]
+        let fixture = FailingStagingPasteboardFixture(originalItems: originalItems)
+        let controller = ClipboardPasteController(pasteboard: fixture)
+        var operationRan = false
+
+        #expect(throws: InteractionSafetyError.clipboardWriteFailed) {
+            try controller.withTemporaryText("temporary secret") {
+                operationRan = true
+            }
+        }
+
+        #expect(!operationRan)
+        #expect(fixture.items == originalItems)
+        #expect(fixture.restoreCallCount == 1)
+        #expect(fixture.restoredOwnedChangeCount == fixture.stagingFailureChangeCount)
+    }
+
+    @Test func clipboardExternalTakeoverBeforePasteNeverDispatchesOrRestores() throws {
+        let fixture = ExternalTakeoverPasteboardFixture()
+        let controller = ClipboardPasteController(pasteboard: fixture)
+        var operationRan = false
+
+        #expect(throws: InteractionSafetyError.clipboardChangedExternally) {
+            try controller.withTemporaryText("temporary secret") {
+                operationRan = true
+            }
+        }
+
+        #expect(!operationRan)
+        #expect(fixture.items == fixture.externalItems)
+        #expect(fixture.restoreCallCount == 0)
+    }
+
+    @Test func clipboardExternalTakeoverAfterSnapshotNeverStagesOrRestores() throws {
+        let fixture = SnapshotTakeoverPasteboardFixture()
+        let controller = ClipboardPasteController(pasteboard: fixture)
+        var operationRan = false
+
+        #expect(throws: InteractionSafetyError.clipboardChangedExternally) {
+            try controller.withTemporaryText("temporary secret") {
+                operationRan = true
+            }
+        }
+
+        #expect(!operationRan)
+        #expect(fixture.replaceCallCount == 0)
+        #expect(fixture.restoreCallCount == 0)
+        #expect(fixture.current == Data("external owner".utf8))
     }
 
     @Test func approvalSummaryNeverContainsTypedPayload() throws {
@@ -2492,10 +2753,10 @@ private final class PasteboardFixture: PasteboardAccessing, @unchecked Sendable 
             capturedChangeCount: changeCount
         )
     }
-    func replaceWithText(_ text: String) -> Int? {
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
         current = Data(text.utf8)
         changeCount += 1
-        return changeCount
+        return .staged(ownedChangeCount: changeCount)
     }
     func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
         if mutateDuringRestore { changeCount += 1; return false }
@@ -2507,10 +2768,111 @@ private final class PasteboardFixture: PasteboardAccessing, @unchecked Sendable 
     }
 }
 
+private final class FailingStagingPasteboardFixture: PasteboardAccessing, @unchecked Sendable {
+    var changeCount = 40
+    var items: [PasteboardItemSnapshot]
+    var restoreCallCount = 0
+    var restoredOwnedChangeCount: Int?
+    private(set) var stagingFailureChangeCount: Int?
+
+    init(originalItems: [PasteboardItemSnapshot]) {
+        self.items = originalItems
+    }
+
+    func snapshot() -> PasteboardSnapshot {
+        PasteboardSnapshot(items: items, capturedChangeCount: changeCount)
+    }
+
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        items.removeAll()
+        changeCount += 1
+        stagingFailureChangeCount = changeCount
+        return .failedAfterMutation(ownedChangeCount: changeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
+        restoreCallCount += 1
+        restoredOwnedChangeCount = ifOwnedChangeCount
+        guard changeCount == ifOwnedChangeCount else { return false }
+        items = snapshot.items
+        changeCount += 1
+        return true
+    }
+}
+
+private final class ExternalTakeoverPasteboardFixture: PasteboardAccessing, @unchecked Sendable {
+    private(set) var changeCount = 70
+    private(set) var items = [
+        PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data("original".utf8)]),
+    ]
+    let externalItems = [
+        PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data("external owner".utf8)]),
+    ]
+    private(set) var restoreCallCount = 0
+
+    func snapshot() -> PasteboardSnapshot {
+        PasteboardSnapshot(items: items, capturedChangeCount: changeCount)
+    }
+
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        changeCount += 1
+        let ownedChangeCount = changeCount
+        items = [PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data(text.utf8)])]
+        // Simulate an external writer taking ownership after our write but
+        // before the controller's pre-dispatch ownership check.
+        changeCount += 1
+        items = externalItems
+        return .staged(ownedChangeCount: ownedChangeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
+        restoreCallCount += 1
+        return false
+    }
+}
+
+private final class SnapshotTakeoverPasteboardFixture: PasteboardAccessing, @unchecked Sendable {
+    private(set) var changeCount = 90
+    private(set) var current = Data("original".utf8)
+    private(set) var replaceCallCount = 0
+    private(set) var restoreCallCount = 0
+
+    func snapshot() -> PasteboardSnapshot {
+        let snapshot = PasteboardSnapshot(
+            items: [PasteboardItemSnapshot(values: ["public.utf8-plain-text": current])],
+            capturedChangeCount: changeCount
+        )
+        changeCount += 1
+        current = Data("external owner".utf8)
+        return snapshot
+    }
+
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        replaceCallCount += 1
+        return .staged(ownedChangeCount: changeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
+        restoreCallCount += 1
+        return false
+    }
+}
+
 private final class InputFixture: SyntheticInputDriving, @unchecked Sendable {
     var keys: [(UInt16, UInt64)] = []
     func click(globalPoint: Point, button: MouseButton, clickCount: Int, cancellation: InteractionCancellationChecking) throws {}
-    func drag(from: Point, to: Point, button: MouseButton, duration: TimeInterval, cancellation: InteractionCancellationChecking) throws {}
+    func drag(
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: TimeInterval,
+        cancellation: InteractionCancellationChecking,
+        validateDestination: @Sendable (Point) throws -> Void
+    ) throws {
+        try cancellation.check()
+        try validateDestination(from)
+        try validateDestination(to)
+    }
     func typeText(_ text: String, cancellation: InteractionCancellationChecking) throws {}
     func key(code: UInt16, flags: UInt64, cancellation: InteractionCancellationChecking) throws {
         try cancellation.check()
@@ -2647,6 +3009,7 @@ private final class RecordingApplicationLauncherFixture: ApplicationLaunching, @
 
 private final class LaunchDenyingPresenterFixture: AccessApprovalPresenting, @unchecked Sendable {
     var lastLaunchRequest: LaunchApprovalRequest?
+    private(set) var accessRequestCount = 0
 
     func requestLaunchApproval(
         _ request: LaunchApprovalRequest,
@@ -2659,7 +3022,10 @@ private final class LaunchDenyingPresenterFixture: AccessApprovalPresenting, @un
     func requestApproval(
         _ request: AccessApprovalRequest,
         cancellation: any InteractionCancellationChecking
-    ) async -> AccessApprovalDecision { .denied }
+    ) async -> AccessApprovalDecision {
+        accessRequestCount += 1
+        return .denied
+    }
 }
 
 private struct LaunchAcceptingPresenterFixture: AccessApprovalPresenting {
@@ -2846,8 +3212,7 @@ struct SecureValueWriteApprovalDispatchTests {
         let connection = ConnectionRecord(
             id: UUID(),
             capabilityToken: String(repeating: "t", count: 43),
-            peer: PeerIdentity(
-                uid: UInt32(getuid()),
+            peer: verifiedTestHarnessPeer(
                 processID: 9_900,
                 name: "secure-write-test-harness",
                 instanceID: "secure-write-test"
@@ -2964,6 +3329,32 @@ struct SecureValueWriteApprovalDispatchTests {
             context: context("approve-secure-write")
         )
         #expect(approval.objectValue?["disposition"] == .string("approved"))
+        #expect(approval.objectValue?["consumed"] == .bool(false))
+
+        // A lost response can be retried exactly without creating a second
+        // action token, while an opposite decision is rejected.
+        let repeatedApproval = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(challengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-secure-write-response-retry")
+        )
+        #expect(repeatedApproval == approval)
+        do {
+            _ = try await controller.handle(
+                method: "approveRisk",
+                params: .object([
+                    "approvalRequestId": .string(challengeID.uuidString),
+                    "approved": .bool(false),
+                ]),
+                context: context("approve-secure-write-opposite-decision")
+            )
+            Issue.record("an opposite decision reused the resolved approval")
+        } catch let error as WireError {
+            #expect(error.code == "APPROVAL_MISMATCH")
+        }
 
         let foreignConnection = ConnectionRecord(
             id: UUID(),
@@ -3041,6 +3432,16 @@ struct SecureValueWriteApprovalDispatchTests {
         #expect(await accessibility.performedCommands() == [
             .setValue(nodeID: 1, value: canary, authorization: .approvedDirectSecure),
         ])
+        let consumedApproval = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(exactChallengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-exact-secure-write-after-consumption")
+        )
+        #expect(consumedApproval.objectValue?["disposition"] == .string("approved"))
+        #expect(consumedApproval.objectValue?["consumed"] == .bool(true))
         do {
             _ = try await controller.handle(
                 method: "action",
@@ -3155,8 +3556,7 @@ struct SecureValueWriteApprovalDispatchTests {
             let connection = ConnectionRecord(
                 id: UUID(),
                 capabilityToken: String(repeating: "p", count: 43),
-                peer: PeerIdentity(
-                    uid: UInt32(getuid()),
+                peer: verifiedTestHarnessPeer(
                     processID: Int32(9_910 + index),
                     name: "protected-write-test-harness",
                     instanceID: "protected-write-test-\(index)"

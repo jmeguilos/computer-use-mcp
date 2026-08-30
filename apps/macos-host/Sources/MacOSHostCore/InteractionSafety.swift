@@ -137,10 +137,15 @@ public struct PasteboardSnapshot: Equatable, Sendable {
     }
 }
 
+public enum PasteboardTextStagingResult: Equatable, Sendable {
+    case staged(ownedChangeCount: Int)
+    case failedAfterMutation(ownedChangeCount: Int)
+}
+
 public protocol PasteboardAccessing: AnyObject, Sendable {
     var changeCount: Int { get }
     func snapshot() -> PasteboardSnapshot
-    func replaceWithText(_ text: String) -> Int?
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult
     func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool
 }
 
@@ -151,6 +156,7 @@ public final class GeneralPasteboardAdapter: PasteboardAccessing, @unchecked Sen
     public var changeCount: Int { pasteboard.changeCount }
 
     public func snapshot() -> PasteboardSnapshot {
+        let capturedChangeCount = pasteboard.changeCount
         let items = (pasteboard.pasteboardItems ?? []).map { item in
             var values: [String: Data] = [:]
             for type in item.types {
@@ -158,13 +164,15 @@ public final class GeneralPasteboardAdapter: PasteboardAccessing, @unchecked Sen
             }
             return PasteboardItemSnapshot(values: values)
         }
-        return PasteboardSnapshot(items: items, capturedChangeCount: pasteboard.changeCount)
+        return PasteboardSnapshot(items: items, capturedChangeCount: capturedChangeCount)
     }
 
-    public func replaceWithText(_ text: String) -> Int? {
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else { return nil }
-        return pasteboard.changeCount
+    public func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        let clearedChangeCount = pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            return .failedAfterMutation(ownedChangeCount: clearedChangeCount)
+        }
+        return .staged(ownedChangeCount: clearedChangeCount)
     }
 
     public func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
@@ -193,8 +201,30 @@ public struct ClipboardPasteController: Sendable {
     /// audit output. Restoration runs on success, error and cancellation.
     public func withTemporaryText<T>(_ text: String, operation: () throws -> T) throws -> T {
         let snapshot = pasteboard.snapshot()
-        guard let ownedCount = pasteboard.replaceWithText(text) else {
+        // Do not clear a value written after our snapshot. AppKit does not
+        // provide an atomic compare-and-replace primitive, but this closes the
+        // avoidable snapshot-to-staging ownership window.
+        guard pasteboard.changeCount == snapshot.capturedChangeCount else {
+            throw InteractionSafetyError.clipboardChangedExternally
+        }
+        let ownedCount: Int
+        switch pasteboard.replaceWithText(text) {
+        case .staged(let changeCount):
+            ownedCount = changeCount
+        case .failedAfterMutation(let changeCount):
+            guard pasteboard.restore(snapshot, ifOwnedChangeCount: changeCount) else {
+                if pasteboard.changeCount != changeCount {
+                    throw InteractionSafetyError.clipboardChangedExternally
+                }
+                throw InteractionSafetyError.clipboardRestoreFailed
+            }
             throw InteractionSafetyError.clipboardWriteFailed
+        }
+        // `clearContents()` establishes our pasteboard ownership. Refuse to
+        // dispatch Command-V if another process took ownership after staging;
+        // restoring here would overwrite the external writer's clipboard.
+        guard pasteboard.changeCount == ownedCount else {
+            throw InteractionSafetyError.clipboardChangedExternally
         }
         let result: Result<T, Error>
         do { result = .success(try operation()) }

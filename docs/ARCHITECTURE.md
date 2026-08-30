@@ -67,9 +67,11 @@ bind a PID, bundle ID, designated-signing identity, and process generation; if
 none is available, it presents **Unidentified local MCP harness**. This verified
 process-ancestry attribution supports truthful display and self-exclusion, but it
 does not authorize the ancestor or prevent another same-user process from
-invoking the genuine bridge. The host treats every caller as untrusted until
-native UI grants an exact target, and its connection-, grant-, frame-, and
-one-shot action checks remain authoritative.
+invoking the genuine bridge. When no verified GUI ancestor is available, the host
+keeps status and inventory readable but marks every application non-grantable and
+denies window and display requests before presenting native approval UI. Verified
+callers remain untrusted until native UI grants an exact target, and the host's
+connection-, grant-, frame-, and one-shot action checks remain authoritative.
 
 ### Native macOS host
 

@@ -545,7 +545,12 @@ private func lifecycleConnection() -> ConnectionRecord {
             uid: UInt32(getuid()),
             processID: 9_001,
             name: "lifecycle-test-harness",
-            instanceID: "lifecycle-test"
+            instanceID: "lifecycle-test",
+            harnessProcessID: 9_101,
+            harnessBundleIdentifier: "com.example.lifecycle-test-harness",
+            harnessSigningIdentity: String(repeating: "f", count: 64),
+            harnessProcessStartTimeUnixMs: 1_700_000_001_000,
+            harnessIdentityVerified: true
         ),
         capabilities: Set(HostCapability.allCases),
         openedAt: now,
