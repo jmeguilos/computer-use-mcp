@@ -661,7 +661,11 @@ public actor HostController: HostMethodHandling {
     }
 
     private func listApps(_ params: JSONValue) async throws -> JSONValue {
-        let apps: [JSONValue] = try await capture.inventory().applications.map { application in
+        let apps: [JSONValue] = try await capture.inventory().applications.filter { application in
+            application.processID > 1 &&
+                !application.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !application.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.map { application in
             .object([
                 "bundleId": .string(application.bundleIdentifier),
                 "name": .string(application.name),

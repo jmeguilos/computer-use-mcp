@@ -544,6 +544,71 @@ struct GrantFrameTransformTests {
         #expect(WireErrorMapping.map(CaptureError.targetIdentityChanged).code == "WINDOW_CLOSED")
     }
 
+    @Test func inventoryOmitsOwnerlessAndInvalidApplicationIdentities() {
+        let ownBundle = "com.jmeguilos.computer-use-mcp.host"
+        #expect(ScreenCaptureService.isInventoryApplicationIdentity(
+            processID: 700,
+            bundleIdentifier: "com.example.fixture",
+            name: "Fixture",
+            ownBundleIdentifier: ownBundle
+        ))
+        for (processID, bundleIdentifier, name) in [
+            (Int32(0), "com.example.fixture", "Fixture"),
+            (Int32(700), "", ""),
+            (Int32(700), "   ", "Fixture"),
+            (Int32(700), "com.example.fixture", "\n"),
+            (Int32(700), ownBundle, "Computer Use MCP Host"),
+        ] {
+            #expect(!ScreenCaptureService.isInventoryApplicationIdentity(
+                processID: processID,
+                bundleIdentifier: bundleIdentifier,
+                name: name,
+                ownBundleIdentifier: ownBundle
+            ))
+        }
+    }
+
+    @Test func listAppsFailsClosedOnInvalidCaptureProviderIdentity() async throws {
+        let invalidApplication = ApplicationDescriptor(
+            bundleIdentifier: "",
+            name: "",
+            processID: 700,
+            windows: [],
+            isProtected: false
+        )
+        let controller = HostController(
+            capture: ProgressiveCaptureServiceFixture(
+                application: invalidApplication,
+                visibleAfterInventoryCall: 1
+            )
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()),
+                processID: 777,
+                name: "fixture-harness",
+                instanceID: "fixture"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        let result = try await controller.handle(
+            method: "listApps",
+            params: .object([:]),
+            context: HostRequestContext(
+                requestID: "invalid-application-inventory",
+                connection: connection,
+                deadline: now.addingTimeInterval(5)
+            )
+        )
+        #expect(result.objectValue?["apps"] == .array([]))
+    }
+
     @Test func displayGrantIsSessionOnlyAndSupportsInteraction() async throws {
         let display = try makeDisplay()
         let store = GrantStore(idleTimeout: 900)

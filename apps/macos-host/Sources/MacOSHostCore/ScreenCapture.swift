@@ -180,7 +180,14 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         let windows = content.windows.compactMap(Self.makeWindowDescriptor)
         let grouped = Dictionary(grouping: windows, by: { $0.identity.processID })
         let applications = content.applications
-            .filter { $0.processID > 1 && $0.bundleIdentifier != bundleIdentifier }
+            .filter {
+                Self.isInventoryApplicationIdentity(
+                    processID: $0.processID,
+                    bundleIdentifier: $0.bundleIdentifier,
+                    name: $0.applicationName,
+                    ownBundleIdentifier: bundleIdentifier
+                )
+            }
             .map { [protectedPolicy] app in
                 let isProtected = !protectedPolicy.evaluate(
                     bundleIdentifier: app.bundleIdentifier,
@@ -205,6 +212,17 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
             }
         let displays = content.displays.compactMap(Self.makeDisplayIdentity).sorted { $0.displayID < $1.displayID }
         return InventorySnapshot(applications: applications, displays: displays)
+    }
+
+    static func isInventoryApplicationIdentity(
+        processID: Int32,
+        bundleIdentifier: String,
+        name: String,
+        ownBundleIdentifier: String
+    ) -> Bool {
+        processID > 1 && bundleIdentifier != ownBundleIdentifier &&
+            !bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public func captureWindow(
