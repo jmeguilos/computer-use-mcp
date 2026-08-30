@@ -841,6 +841,11 @@ public actor HostController: HostMethodHandling {
                 !application.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                 !application.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }.map { application in
+            // Without a verified GUI ancestor, the bridge cannot prove which
+            // application belongs to the requesting harness. Inventory stays
+            // readable, but every candidate must remain non-grantable so
+            // self-control cannot fail open.
+            let canExcludeRequestingHarness = context.connection.peer.captureExclusion != nil
             let isRequestingHarness = context.connection.peer.matchesHarnessApplication(
                 bundleIdentifier: application.bundleIdentifier
             )
@@ -854,7 +859,10 @@ public actor HostController: HostMethodHandling {
                 "pid": .number(Double(application.processID)),
                 "windowCount": .number(Double(application.windows.count)),
                 "grantable": .bool(
-                    !application.isProtected && !isRequestingHarness && hasGrantableWindow
+                    canExcludeRequestingHarness &&
+                        !application.isProtected &&
+                        !isRequestingHarness &&
+                        hasGrantableWindow
                 ),
             ])
         }
@@ -886,6 +894,18 @@ public actor HostController: HostMethodHandling {
                 code: "ACCESS_DENIED",
                 message: "interact requires observe; clipboard_write requires observe and interact"
             )
+        }
+        // Window and display grants must exclude the requesting GUI itself.
+        // If the signed bridge cannot derive and bind that ancestor, there is
+        // no safe target set to present. Keep diagnostics available, but deny
+        // all authority creation for this connection.
+        guard context.connection.peer.captureExclusion != nil else {
+            return .object([
+                "status": .string("denied"),
+                "message": .string(
+                    "The requesting application identity could not be verified; restart the MCP client from its signed macOS application before requesting control"
+                ),
+            ])
         }
         let requestedDisplayTarget: Bool = {
             if case .display = request.target { return true }

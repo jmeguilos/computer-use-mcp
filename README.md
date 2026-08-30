@@ -146,7 +146,9 @@ vendor's official documentation on 2026-08-29.
    exact action. On the normal bridge path, caller-provided names and instance IDs
    are discarded; the bridge attributes the request to the nearest verifiable GUI
    process ancestor, or reports **Unidentified local MCP harness** when it cannot
-   derive one.
+   derive one. An unidentified harness may inspect status and inventory, but all
+   inventory entries remain non-grantable and target requests are denied before
+   the native picker opens.
 3. On first run, the native settings window keeps General app access off until
    the user enables it and reports Screen Recording and Accessibility as two
    separate macOS decisions. Turning the switch on grants no target authority.

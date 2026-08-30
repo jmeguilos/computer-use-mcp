@@ -142,6 +142,8 @@ class FakeBridge implements NativeBridge {
   }> = [];
   public riskChallenge = false;
   public nextError: Error | undefined;
+  public nextApproveRiskError: Error | undefined;
+  public nextApproveRiskDisposition: "approved" | "denied" | undefined;
   public closed = false;
   public stateTarget: unknown = windowTarget;
   public accessibilityState: unknown = fullAccessibilityState;
@@ -166,6 +168,11 @@ class FakeBridge implements NativeBridge {
     if (this.nextError !== undefined) {
       const error = this.nextError;
       this.nextError = undefined;
+      throw error;
+    }
+    if (method === "approveRisk" && this.nextApproveRiskError !== undefined) {
+      const error = this.nextApproveRiskError;
+      this.nextApproveRiskError = undefined;
       throw error;
     }
 
@@ -241,9 +248,12 @@ class FakeBridge implements NativeBridge {
       };
     }
     if (method === "approveRisk") {
+      const disposition = this.nextApproveRiskDisposition ??
+        (record.approved === true ? "approved" : "denied");
+      this.nextApproveRiskDisposition = undefined;
       return {
         approvalRequestId: String(record.approvalRequestId),
-        disposition: record.approved === true ? "approved" : "denied",
+        disposition,
         consumed: false
       };
     }
@@ -693,6 +703,69 @@ describe("Computer Use MCP server", () => {
       approvalRequestId,
       approved: true
     });
+  });
+
+  it.each([
+    { code: "BRIDGE_UNAVAILABLE" as const, message: "The native bridge disconnected." },
+    { code: "ACTION_TIMEOUT" as const, message: "The approval resolution timed out." }
+  ])(
+    "keeps an elicitation approval retryable when approveRisk fails with $code",
+    async ({ code, message }) => {
+      const bridge = new FakeBridge();
+      bridge.riskChallenge = true;
+      bridge.nextApproveRiskError = new ComputerUseError(code, message, { retryable: true });
+      const { client } = await connectHarness({ bridge, era: "modern", confirm: true });
+
+      const failed = await client.callTool({
+        name: "computer_click",
+        arguments: clickArguments()
+      });
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toMatchObject({
+        ok: false,
+        error: { code, retryable: true }
+      });
+
+      const completed = await client.callTool({
+        name: "computer_click",
+        arguments: clickArguments()
+      });
+      expect(completed.structuredContent).toMatchObject({ ok: true, status: "completed" });
+      expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(2);
+
+      const replay = await client.callTool({
+        name: "computer_click",
+        arguments: clickArguments()
+      });
+      expect(replay.structuredContent).toMatchObject({
+        ok: false,
+        error: { code: "APPROVAL_USED" }
+      });
+      expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(2);
+    }
+  );
+
+  it("rejects a mismatched native approval disposition without consuming local retry state", async () => {
+    const bridge = new FakeBridge();
+    bridge.riskChallenge = true;
+    bridge.nextApproveRiskDisposition = "denied";
+    const { client } = await connectHarness({ bridge, era: "modern", confirm: true });
+
+    const failed = await client.callTool({
+      name: "computer_click",
+      arguments: clickArguments()
+    });
+    expect(failed.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: "BRIDGE_PROTOCOL_ERROR" }
+    });
+
+    const completed = await client.callTool({
+      name: "computer_click",
+      arguments: clickArguments()
+    });
+    expect(completed.structuredContent).toMatchObject({ ok: true, status: "completed" });
+    expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(2);
   });
 
   it("can force the one-shot native panel path for a modern elicitation client", async () => {

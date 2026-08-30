@@ -166,6 +166,7 @@ export class ComputerUseMcpRuntime {
   readonly #approvalMode: "auto" | "native";
   readonly #onDiagnostic: (message: string, error?: unknown) => void;
   readonly #resolvedChallenges = new Map<string, number>();
+  readonly #resolvingChallenges = new Set<string>();
 
   public constructor(options: ComputerUseMcpServerOptions = {}) {
     this.#bridge = options.bridge ?? createDefaultNativeBridge();
@@ -541,7 +542,7 @@ export class ComputerUseMcpRuntime {
             "The input approval_request_id does not match the verified elicitation state."
           );
         }
-        return this.#continueElicitedAction(args, action, state, ctx);
+        return await this.#continueElicitedAction(args, action, state, ctx);
       }
 
       this.#approvalRegistry.assertRetry(action.toolName, recordArgs);
@@ -676,19 +677,32 @@ export class ComputerUseMcpRuntime {
     if (this.#resolvedChallenges.has(approvalRequestId)) {
       throw new ComputerUseError("APPROVAL_USED", "The approval request has already been resolved.");
     }
-    this.#resolvedChallenges.set(approvalRequestId, Date.parse(expiresAt));
-    const raw = await this.#callNative(
-      "approveRisk",
-      { approval_request_id: approvalRequestId, approved },
-      ctx,
-      10_000
-    );
-    const parsed = NativeApprovalResolutionSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.approval_request_id !== approvalRequestId) {
-      throw this.#protocolError("The native bridge returned an invalid approval resolution.");
+    if (this.#resolvingChallenges.has(approvalRequestId)) {
+      throw new ComputerUseError("BUSY", "Approval resolution is already in progress.", {
+        retryable: true,
+        remediation: "Retry this exact approval response after the in-progress resolution finishes."
+      });
     }
-    if (approved && parsed.data.disposition === "denied") {
-      throw new ComputerUseError("ACCESS_DENIED", "The native host denied the approved action.");
+
+    this.#resolvingChallenges.add(approvalRequestId);
+    try {
+      const raw = await this.#callNative(
+        "approveRisk",
+        { approval_request_id: approvalRequestId, approved },
+        ctx,
+        10_000
+      );
+      const parsed = NativeApprovalResolutionSchema.safeParse(raw);
+      if (!parsed.success || parsed.data.approval_request_id !== approvalRequestId) {
+        throw this.#protocolError("The native bridge returned an invalid approval resolution.");
+      }
+      const expectedDisposition = approved ? "approved" : "denied";
+      if (parsed.data.disposition !== expectedDisposition) {
+        throw this.#protocolError("The native bridge returned the wrong approval disposition.");
+      }
+      this.#resolvedChallenges.set(approvalRequestId, Date.parse(expiresAt));
+    } finally {
+      this.#resolvingChallenges.delete(approvalRequestId);
     }
   }
 

@@ -47,9 +47,11 @@ names and instance IDs and derives requester attribution from the nearest
 verifiable GUI process ancestor, binding its PID, bundle ID, signing identity,
 and process generation; if that is not possible, it reports **Unidentified local
 MCP harness**. Explicit source-development direct peers bypass that derivation,
-so their requester display attribution is untrusted. In either case requester
-attribution is only UI/self-exclusion context: it neither authorizes the caller
-nor prevents another same-user program from invoking the bridge. A
+so their requester display attribution is untrusted. An unverified requester may
+read status and inventory, but every application is non-grantable and window or
+display access is denied before approval UI. Verified requester attribution is
+only UI/self-exclusion context: it neither authorizes the caller nor prevents
+another same-user program from invoking the bridge. A
 client that negotiates MCP elicitation is trusted
 only to render the exact challenge and relay the interactive user's decision;
 it receives no target authority from that decision. Clients not trusted for

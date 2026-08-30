@@ -249,6 +249,14 @@ public struct SyntheticDestinationGuard: Sendable {
                 if isProtected(entry) {
                     return .protectedSurface
                 }
+                // A point event is delivered to the frontmost receiving
+                // surface at that coordinate, regardless of its WindowServer
+                // layer. A different elevated window (including another
+                // window owned by the granted app) is therefore an unrelated
+                // destination and must fail closed. Keep the layer-zero rule
+                // for whole-target checks, whose synthetic key destination is
+                // separately bound to the exact focused AX window.
+                if intersectsPoint { return .unrelatedOccluder }
                 if entry.layer != 0 { continue }
                 return .unrelatedOccluder
             }

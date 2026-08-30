@@ -137,10 +137,15 @@ public struct PasteboardSnapshot: Equatable, Sendable {
     }
 }
 
+public enum PasteboardTextStagingResult: Equatable, Sendable {
+    case staged(ownedChangeCount: Int)
+    case failedAfterMutation(ownedChangeCount: Int)
+}
+
 public protocol PasteboardAccessing: AnyObject, Sendable {
     var changeCount: Int { get }
     func snapshot() -> PasteboardSnapshot
-    func replaceWithText(_ text: String) -> Int?
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult
     func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool
 }
 
@@ -161,10 +166,12 @@ public final class GeneralPasteboardAdapter: PasteboardAccessing, @unchecked Sen
         return PasteboardSnapshot(items: items, capturedChangeCount: pasteboard.changeCount)
     }
 
-    public func replaceWithText(_ text: String) -> Int? {
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else { return nil }
-        return pasteboard.changeCount
+    public func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        let clearedChangeCount = pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            return .failedAfterMutation(ownedChangeCount: clearedChangeCount)
+        }
+        return .staged(ownedChangeCount: pasteboard.changeCount)
     }
 
     public func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
@@ -193,7 +200,17 @@ public struct ClipboardPasteController: Sendable {
     /// audit output. Restoration runs on success, error and cancellation.
     public func withTemporaryText<T>(_ text: String, operation: () throws -> T) throws -> T {
         let snapshot = pasteboard.snapshot()
-        guard let ownedCount = pasteboard.replaceWithText(text) else {
+        let ownedCount: Int
+        switch pasteboard.replaceWithText(text) {
+        case .staged(let changeCount):
+            ownedCount = changeCount
+        case .failedAfterMutation(let changeCount):
+            guard pasteboard.restore(snapshot, ifOwnedChangeCount: changeCount) else {
+                if pasteboard.changeCount != changeCount {
+                    throw InteractionSafetyError.clipboardChangedExternally
+                }
+                throw InteractionSafetyError.clipboardRestoreFailed
+            }
             throw InteractionSafetyError.clipboardWriteFailed
         }
         let result: Result<T, Error>
