@@ -19,7 +19,8 @@ public enum WireErrorMapping {
             switch value {
             case .permissionDenied: return WireError(code: "PERMISSION_REQUIRED", message: "Accessibility permission is required")
             case .focusMismatch: return WireError(code: "FOCUS_FAILED", message: "The exact granted window could not be focused")
-            case .windowNotFound, .windowMappingAmbiguous: return WireError(code: "WINDOW_CLOSED", message: "The exact granted window could not be resolved")
+            case .windowNotFound, .windowMappingAmbiguous, .windowBindingChanged:
+                return WireError(code: "WINDOW_CLOSED", message: "The exact granted window could not be resolved")
             case .staleRevision, .sessionNotFound: return WireError(code: "STALE_FRAME", message: "Refresh target state before retrying", retryable: true)
             case .elementNotFound, .textNotFound, .textAmbiguous: return WireError(code: "ELEMENT_NOT_FOUND", message: "The current-frame element was not found", retryable: true)
             case .secureElement:

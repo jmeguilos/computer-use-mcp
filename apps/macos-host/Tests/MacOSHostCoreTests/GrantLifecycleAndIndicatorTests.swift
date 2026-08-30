@@ -1,4 +1,5 @@
 import Darwin
+import CoreGraphics
 import Foundation
 import Testing
 @testable import MacOSHostCore
@@ -32,7 +33,78 @@ struct GrantLifecycleMaintenanceTests {
         #expect(!(await indicator.hiddenGrantIDs()).contains(grantID))
 
         await capture.setWindow(nil)
-        await controller.maintenance()
+        #expect(await controller.activeGrantCount() == 0)
+        #expect((await indicator.hiddenGrantIDs()).contains(grantID))
+    }
+
+    @Test func validAXIdentitySampleResetsTheTransientMappingMissCounter() async throws {
+        let original = try lifecycleWindow(isOnScreen: true)
+        let capture = MutableLifecycleCapture(window: original)
+        let indicator = LifecycleIndicatorFixture()
+        let accessibility = LifecycleAccessibilityFixture()
+        let controller = HostController(
+            capture: capture,
+            accessibility: accessibility,
+            permissions: LifecyclePermissionFixture(),
+            accessPresenter: LifecycleAccessPresenterFixture(),
+            indicator: indicator
+        )
+        let response = try await controller.handle(
+            method: "requestAccess",
+            params: lifecycleAccessRequest(),
+            context: lifecycleContext(connection: lifecycleConnection())
+        )
+        let grantID = try #require(
+            response.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+
+        await accessibility.simulateTransientValidationMisses(1)
+        #expect(await controller.activeGrantCount() == 1)
+
+        #expect(await controller.activeGrantCount() == 1)
+
+        await accessibility.simulateTransientValidationMisses(2)
+        #expect(await controller.activeGrantCount() == 1)
+        #expect(await controller.activeGrantCount() == 1)
+        #expect(!(await indicator.hiddenGrantIDs()).contains(grantID))
+
+        #expect(await controller.activeGrantCount() == 1)
+        await accessibility.simulateTransientValidationMisses(3)
+        #expect(await controller.activeGrantCount() == 1)
+        #expect(await controller.activeGrantCount() == 1)
+        #expect(await controller.activeGrantCount() == 0)
+        #expect((await indicator.hiddenGrantIDs()).contains(grantID))
+    }
+
+    @Test func transientAccessibilityMappingMissesDebounceButBindingChangeRevokesImmediately() async throws {
+        let original = try lifecycleWindow(isOnScreen: true)
+        let capture = MutableLifecycleCapture(window: original)
+        let indicator = LifecycleIndicatorFixture()
+        let accessibility = LifecycleAccessibilityFixture()
+        let controller = HostController(
+            capture: capture,
+            accessibility: accessibility,
+            permissions: LifecyclePermissionFixture(),
+            accessPresenter: LifecycleAccessPresenterFixture(),
+            indicator: indicator
+        )
+        let response = try await controller.handle(
+            method: "requestAccess",
+            params: lifecycleAccessRequest(),
+            context: lifecycleContext(connection: lifecycleConnection())
+        )
+        let grantID = try #require(
+            response.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+
+        await accessibility.simulateTransientValidationMisses(2)
+        #expect(await controller.activeGrantCount() == 1)
+        #expect(await controller.activeGrantCount() == 1)
+
+        // A valid sample clears the transient counter. A concrete AX object
+        // replacement is not another transient miss and revokes immediately.
+        #expect(await controller.activeGrantCount() == 1)
+        await accessibility.simulateWindowRecreation()
         #expect(await controller.activeGrantCount() == 0)
         #expect((await indicator.hiddenGrantIDs()).contains(grantID))
     }
@@ -304,6 +376,131 @@ struct IndicatorAttachmentSafetyTests {
             attachmentOccupants: [strip]
         ))
     }
+
+    @Test func windowInfoLookupUsesTheExactIDInsteadOfZOrder() throws {
+        let entries: [[String: Any]] = [
+            [
+                kCGWindowNumber as String: NSNumber(value: UInt32(900)),
+                kCGWindowOwnerName as String: "Unrelated foreground window",
+            ],
+            [
+                kCGWindowNumber as String: NSNumber(value: UInt32(700)),
+                kCGWindowOwnerName as String: "Granted target",
+            ],
+        ]
+
+        let selected = try #require(IndicatorWindowInfoLookup.exactEntry(
+            in: entries,
+            windowID: 700
+        ))
+        #expect((selected[kCGWindowNumber as String] as? NSNumber)?.uint32Value == 700)
+        #expect(IndicatorWindowInfoLookup.exactEntry(in: entries, windowID: 701) == nil)
+    }
+
+    @Test func oneTransientWindowMissDoesNotRevokeButRepeatedMissesDo() {
+        var tracker = IndicatorTransientMissTracker(limit: 3)
+
+        let firstMissRevokes = tracker.recordMissing()
+        #expect(!firstMissRevokes)
+        #expect(tracker.consecutiveMisses == 1)
+        let secondMissRevokes = tracker.recordMissing()
+        #expect(!secondMissRevokes)
+        #expect(tracker.consecutiveMisses == 2)
+        let thirdMissRevokes = tracker.recordMissing()
+        #expect(thirdMissRevokes)
+        #expect(tracker.consecutiveMisses == 3)
+    }
+
+    @Test func aPresentWindowResetsTheTransientMissBound() {
+        var tracker = IndicatorTransientMissTracker(limit: 2)
+
+        let firstMissRevokes = tracker.recordMissing()
+        #expect(!firstMissRevokes)
+        tracker.recordPresent()
+        #expect(tracker.consecutiveMisses == 0)
+        let missAfterResetRevokes = tracker.recordMissing()
+        #expect(!missAfterResetRevokes)
+        let secondMissAfterResetRevokes = tracker.recordMissing()
+        #expect(secondMissAfterResetRevokes)
+    }
+
+    @Test func approvalFocusRestoresOnlyWhileTheHelperStillOwnsForeground() {
+        let host: Int32 = 100
+        let prior: Int32 = 200
+
+        #expect(NativeApprovalFocusPolicy.shouldRestore(
+            priorProcessID: prior,
+            currentProcessID: host,
+            hostProcessID: host
+        ))
+        #expect(!NativeApprovalFocusPolicy.shouldRestore(
+            priorProcessID: prior,
+            currentProcessID: 300,
+            hostProcessID: host
+        ))
+        #expect(!NativeApprovalFocusPolicy.shouldRestore(
+            priorProcessID: host,
+            currentProcessID: host,
+            hostProcessID: host
+        ))
+        #expect(!NativeApprovalFocusPolicy.shouldRestore(
+            priorProcessID: nil,
+            currentProcessID: host,
+            hostProcessID: host
+        ))
+    }
+
+    @Test func accessApprovalButtonsExposeExplicitPersistenceChoices() {
+        let freshWindow = NativeAccessApprovalButtonPlan.make(
+            displayTarget: false,
+            appConsentExists: false,
+            candidateCount: 1
+        )
+        #expect(freshWindow.positiveChoices == [
+            NativeAccessApprovalButtonChoice(title: "Allow Once", persistence: .allowOnce),
+            NativeAccessApprovalButtonChoice(title: "Always Allow App", persistence: .alwaysAllowApp),
+        ])
+        #expect(freshWindow.cancelTitle == "Not Now")
+
+        let remembered = NativeAccessApprovalButtonPlan.make(
+            displayTarget: false,
+            appConsentExists: true,
+            candidateCount: 1
+        )
+        #expect(remembered.positiveChoices.isEmpty)
+        #expect(remembered.cancelTitle == "Not Now")
+
+        let ambiguous = NativeAccessApprovalButtonPlan.make(
+            displayTarget: false,
+            appConsentExists: false,
+            candidateCount: 2
+        )
+        #expect(ambiguous.positiveChoices == [
+            NativeAccessApprovalButtonChoice(title: "Allow Once", persistence: .allowOnce),
+            NativeAccessApprovalButtonChoice(title: "Always Allow App", persistence: .alwaysAllowApp),
+        ])
+
+        let rememberedAmbiguous = NativeAccessApprovalButtonPlan.make(
+            displayTarget: false,
+            appConsentExists: true,
+            candidateCount: 2
+        )
+        #expect(rememberedAmbiguous.positiveChoices == [
+            NativeAccessApprovalButtonChoice(title: "Use Selected Window", persistence: .alwaysAllowApp),
+        ])
+
+        let display = NativeAccessApprovalButtonPlan.make(
+            displayTarget: true,
+            appConsentExists: false,
+            candidateCount: 1
+        )
+        #expect(display.positiveChoices == [
+            NativeAccessApprovalButtonChoice(
+                title: "Allow Display for Session",
+                persistence: .sessionOnly
+            ),
+        ])
+    }
 }
 
 private enum LifecycleFixtureError: Error {
@@ -369,10 +566,14 @@ private actor MutableLifecycleCapture: ScreenCaptureServing {
 
 private actor LifecycleAccessibilityFixture: AccessibilityServing {
     private var generation = 0
+    private var transientValidationMisses = 0
     private var bindingGenerations: [ObjectIdentifier: Int] = [:]
     private var sessions: [UUID: (identity: WindowIdentity, generation: Int)] = [:]
 
     func simulateWindowRecreation() { generation += 1 }
+    func simulateTransientValidationMisses(_ count: Int) {
+        transientValidationMisses = max(0, count)
+    }
 
     func createWindowBinding(window: WindowDescriptor) throws -> AccessibilityWindowBinding {
         let binding = AccessibilityWindowBinding.fixtureToken()
@@ -385,7 +586,7 @@ private actor LifecycleAccessibilityFixture: AccessibilityServing {
         window: WindowDescriptor
     ) throws {
         guard bindingGenerations[ObjectIdentifier(binding)] == generation else {
-            throw AccessibilityError.windowNotFound
+            throw AccessibilityError.windowBindingChanged
         }
     }
 
@@ -399,10 +600,14 @@ private actor LifecycleAccessibilityFixture: AccessibilityServing {
     }
 
     func validateWindowBinding(sessionID: UUID, window: WindowDescriptor) throws {
+        if transientValidationMisses > 0 {
+            transientValidationMisses -= 1
+            throw AccessibilityError.windowNotFound
+        }
         guard let session = sessions[sessionID],
               session.identity == window.identity,
               session.generation == generation else {
-            throw AccessibilityError.windowNotFound
+            throw AccessibilityError.windowBindingChanged
         }
     }
 

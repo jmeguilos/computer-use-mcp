@@ -191,15 +191,266 @@ struct HostPreferencesAndPresentationTests {
 
 @Suite("Persistent app consent", .serialized)
 struct PersistentAppConsentTests {
-    private func identity() throws -> WindowIdentity {
+    private func identity(
+        windowID: UInt32 = 42,
+        bundleIdentifier: String = "com.example.fixture",
+        signingIdentity: String = "designated-requirement-digest"
+    ) throws -> WindowIdentity {
         try WindowIdentity(
-            windowID: 42,
+            windowID: windowID,
             processID: 4242,
-            bundleIdentifier: "com.example.fixture",
+            bundleIdentifier: bundleIdentifier,
             ownerName: "Fixture",
-            signingIdentity: "designated-requirement-digest",
+            signingIdentity: signingIdentity,
             processStartTimeUnixMs: 1_700_000_000_000
         )
+    }
+
+    private func requester(
+        bundleIdentifier: String = "com.example.cursor",
+        signingIdentity: String = "cursor-designated-requirement-digest",
+        verified: Bool = true
+    ) -> PeerIdentity {
+        PeerIdentity(
+            uid: UInt32(getuid()),
+            processID: 7_777,
+            name: "Fixture harness",
+            instanceID: "fixture-harness",
+            harnessProcessID: 8_888,
+            harnessBundleIdentifier: bundleIdentifier,
+            harnessSigningIdentity: signingIdentity,
+            harnessProcessStartTimeUnixMs: 1_700_000_100_000,
+            harnessIdentityVerified: verified
+        )
+    }
+
+    private func writeConsentFixture(_ text: String, to url: URL) throws {
+        let parent = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int(S_IRWXU))]
+        )
+        guard chmod(parent.path, S_IRWXU) == 0 else {
+            throw HostPreferencesFixtureError.unexpected
+        }
+        try writePreferencesFixture(text, to: url)
+    }
+
+    @Test func unversionedConsentMigratesToPromptOnlyWithoutAutomaticAuthority() async throws {
+        let root = try preferencesTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("consent/apps.json")
+        try writeConsentFixture(
+            """
+            [{"bundleIdentifier":"com.example.fixture","capabilities":["observe","interact"],"signingIdentity":"designated-requirement-digest","updatedAt":"2026-08-30T00:00:00Z"}]
+            """,
+            to: url
+        )
+
+        let store = try PersistentAppConsentStore(url: url)
+        let window = try identity()
+        let records = await store.all()
+        let record = try #require(records.first)
+        #expect(records.count == 1)
+        #expect(record.recordVersion == PersistentAppConsent.legacyRecordVersion)
+        #expect(record.policy == .promptEachWindow)
+        #expect(record.requesterBundleIdentifier == nil)
+        #expect(record.requesterSigningIdentity == nil)
+        #expect(await store.allows(window: window, capabilities: [.observe]))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: requester(),
+            window: window,
+            capabilities: [.observe]
+        )))
+    }
+
+    @Test func automaticConsentBindsRequesterTargetSigningAndCapabilityCeiling() async throws {
+        let root = try preferencesTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("consent/apps.json")
+        let store = try PersistentAppConsentStore(url: url)
+        let approvedRequester = requester()
+        let approvedWindow = try identity()
+        let recreatedWindow = try identity(windowID: 43)
+        let replacementSignedWindow = try identity(
+            signingIdentity: "replacement-target-signing-digest"
+        )
+
+        try await store.recordAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: approvedWindow,
+            capabilities: [.observe, .interact],
+            now: Date(timeIntervalSince1970: 1_777_776_000)
+        )
+
+        // A recreated exact window from the same signed app is eligible at the
+        // policy layer. HostController must still prove it is the sole bound
+        // candidate before issuing a fresh connection-bound grant.
+        #expect(await store.allowsAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: recreatedWindow,
+            capabilities: [.observe]
+        ))
+        #expect(await store.allowsAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: approvedWindow,
+            capabilities: [.observe, .interact]
+        ))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: approvedWindow,
+            capabilities: [.observe, .interact, .clipboardWrite]
+        )))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: requester(signingIdentity: "different-harness-signing-digest"),
+            window: approvedWindow,
+            capabilities: [.observe]
+        )))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: requester(bundleIdentifier: "com.example.claude"),
+            window: approvedWindow,
+            capabilities: [.observe]
+        )))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: replacementSignedWindow,
+            capabilities: [.observe]
+        )))
+
+        let persisted = try PersistentAppConsentStore(url: url)
+        #expect(await persisted.allowsAutoGrantUniqueWindow(
+            requester: approvedRequester,
+            window: approvedWindow,
+            capabilities: [.observe]
+        ))
+        let record = try #require((await persisted.all()).first)
+        #expect(record.recordVersion == PersistentAppConsent.currentRecordVersion)
+        #expect(record.policy == .autoGrantUniqueWindow)
+        #expect(record.requesterBundleIdentifier == approvedRequester.harnessBundleIdentifier)
+        #expect(record.requesterSigningIdentity == approvedRequester.harnessSigningIdentity)
+    }
+
+    @Test func legacyRecordAPICannotCreateOrUpgradeAutomaticAuthority() async throws {
+        let root = try preferencesTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("consent/apps.json")
+        let store = try PersistentAppConsentStore(url: url)
+        let window = try identity()
+
+        try await store.record(window: window, capabilities: [.observe, .interact])
+        #expect(await store.allows(window: window, capabilities: [.observe]))
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: requester(),
+            window: window,
+            capabilities: [.observe]
+        )))
+        let record = try #require((await store.all()).first)
+        #expect(record.recordVersion == PersistentAppConsent.legacyRecordVersion)
+        #expect(record.policy == .promptEachWindow)
+    }
+
+    @Test func unverifiedRequesterCannotCreateOrUseAutomaticAuthority() async throws {
+        let root = try preferencesTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("consent/apps.json")
+        let store = try PersistentAppConsentStore(url: url)
+        let unverified = requester(verified: false)
+        let window = try identity()
+
+        do {
+            try await store.recordAutoGrantUniqueWindow(
+                requester: unverified,
+                window: window,
+                capabilities: [.observe]
+            )
+            Issue.record("unverified requester created automatic consent")
+        } catch {
+            #expect(error as? ConsentStoreError == .unverifiedRequester)
+        }
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: unverified,
+            window: window,
+            capabilities: [.observe]
+        )))
+        #expect((await store.all()).isEmpty)
+    }
+
+    @Test func exactRevokePreservesOtherHarnessPolicyForTheSameTarget() async throws {
+        let root = try preferencesTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("consent/apps.json")
+        let store = try PersistentAppConsentStore(url: url)
+        let window = try identity()
+        let cursor = requester()
+        let claude = requester(
+            bundleIdentifier: "com.example.claude",
+            signingIdentity: "claude-designated-requirement-digest"
+        )
+        try await store.recordAutoGrantUniqueWindow(
+            requester: cursor,
+            window: window,
+            capabilities: [.observe]
+        )
+        try await store.recordAutoGrantUniqueWindow(
+            requester: claude,
+            window: window,
+            capabilities: [.observe, .interact]
+        )
+
+        let records = await store.all()
+        let cursorRecord = try #require(records.first {
+            $0.requesterBundleIdentifier == cursor.harnessBundleIdentifier
+        })
+        #expect(records.count == 2)
+        let revoked = try await store.revoke(cursorRecord)
+        #expect(revoked)
+        #expect(!(await store.allowsAutoGrantUniqueWindow(
+            requester: cursor,
+            window: window,
+            capabilities: [.observe]
+        )))
+        #expect(await store.allowsAutoGrantUniqueWindow(
+            requester: claude,
+            window: window,
+            capabilities: [.observe]
+        ))
+        #expect((await store.all()).count == 1)
+
+        try await store.revoke(
+            bundleIdentifier: window.bundleIdentifier,
+            signingIdentity: window.signingIdentity
+        )
+        #expect((await store.all()).isEmpty)
+    }
+
+    @Test func malformedUnknownAndDuplicateRecordsFailClosed() throws {
+        let validAuto = """
+        {"bundleIdentifier":"com.example.fixture","capabilities":["observe"],"policy":"autoGrantUniqueWindow","recordVersion":2,"requesterBundleIdentifier":"com.example.cursor","requesterSigningIdentity":"cursor-designated-requirement-digest","signingIdentity":"designated-requirement-digest","updatedAt":"2026-08-30T00:00:00Z"}
+        """
+        let malformedRecords = [
+            "not-json",
+            """
+            [{"bundleIdentifier":"com.example.fixture","capabilities":["observe"],"policy":"autoGrantUniqueWindow","recordVersion":2,"requesterBundleIdentifier":"com.example.cursor","signingIdentity":"designated-requirement-digest","updatedAt":"2026-08-30T00:00:00Z"}]
+            """,
+            """
+            [{"bundleIdentifier":"com.example.fixture","capabilities":["observe"],"policy":"promptEachWindow","recordVersion":99,"signingIdentity":"designated-requirement-digest","updatedAt":"2026-08-30T00:00:00Z"}]
+            """,
+            "[\(validAuto),\(validAuto)]",
+        ]
+
+        for payload in malformedRecords {
+            let root = try preferencesTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let url = root.appendingPathComponent("consent/apps.json")
+            try writeConsentFixture(payload, to: url)
+            do {
+                _ = try PersistentAppConsentStore(url: url)
+                Issue.record("malformed consent store was accepted")
+            } catch {
+                #expect(error as? ConsentStoreError == .invalidRecord)
+            }
+        }
     }
 
     @Test func failedRecordPersistenceDoesNotCreateInMemoryConsent() async throws {

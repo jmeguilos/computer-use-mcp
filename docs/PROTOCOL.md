@@ -77,13 +77,20 @@ app selector is a discriminated object using `bundle_id`, `name`, or absolute
 `launch_if_needed` is accepted only with a bundle-ID selector. A path selector
 may match an already-running app at that exact canonical bundle path, but the
 alpha never launches an executable named by a path. Name selectors likewise
-select running applications only.
+select running applications only. Launching an absent application has a separate
+native approval and is never implied by an always-allowed target policy.
 
 For a display, the target is
 `{"kind":"display","display_id":"opaque-display-id"}` using an ID from
-`computer_list_displays`. The host presents native UI for target and persistence
-choice. A client cannot name an arbitrary native window ID and skip selection.
-Full-display grants are always session-only.
+`computer_list_displays`. The host presents native UI for the display decision.
+For a window, a first or unmatched request presents native target and persistence
+UI. A versioned **Always Allow App** policy may satisfy only a later explicit
+request from the same verified requester for the same signed target and a
+capability subset, after exactly one safe Accessibility-bound window resolves.
+Ambiguity, requester or target-signature changes, capability escalation, and
+legacy prompt-only records require UI again. A client cannot name an arbitrary
+native window ID and skip resolution. Full-display grants are always
+session-only and never persisted.
 
 A successful access result has the shape:
 

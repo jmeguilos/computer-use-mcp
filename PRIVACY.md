@@ -19,7 +19,7 @@ access to sensitive windows.
 | Clipboard write | Explicit `clipboard_write` capability | Written to the system pasteboard; not copied into the audit log |
 | Window identity | Target binding and revalidation | Grant lifetime; redacted audit metadata |
 | Host settings | Onboarding revision and fail-closed General app access switch | Mode-`0600` local preferences until removed |
-| Remembered app decision | Match a previously approved bundle ID, signing identity, and capability set | Mode-`0600` local consent store until individually or collectively removed |
+| Always-allowed app policy | Match a verified requester identity, signed target app identity, and capability ceiling for a later explicit request | Mode-`0600` local consent store until individually or collectively removed |
 | Socket audit token and connection capability | Authenticate the signed native bridge and authorize local bridge calls | Memory and mode-`0600` runtime token file; never logged |
 | Audit metadata | Accountability and debugging | Mode-`0600` JSON Lines, up to 7 days or 10,000 events |
 
@@ -77,10 +77,14 @@ must not result in an enabled policy.
 - Closing or replacing the target window invalidates its grant.
 - Client disconnect, lock, idle expiry, or host exit invalidates connection-bound
   grants.
-- Remembered app decisions can be removed individually or all at once in
-  **Computer Control Settings…**. They remember signed app identity and capability policy,
-  not a live authority token or a window. Every new grant still requires an
-  exact window choice. A display decision is session-only and never remembered.
+- Always-allowed app policies can be removed individually or all at once in
+  **Computer Control Settings…**. They bind the verified requesting harness,
+  signed target app identity, and capability ceiling—not a live authority token
+  or a window. A later explicit request may reuse a policy only when exactly one
+  safe window matches; ambiguous targets and sensitive actions still require
+  approval. Client or signing-identity changes and capability escalation prompt
+  again. Application launch remains separate, legacy decisions remain
+  prompt-only, and a display decision is session-only and never remembered.
 
 Locked use is excluded from v1. Lock, sleep, screen sleep, or session resignation
 revokes active authority; there is no lock-screen control or locked-use toggle.

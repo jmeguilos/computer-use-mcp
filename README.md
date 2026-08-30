@@ -26,8 +26,13 @@ other stdio-capable MCP host.
   harness**), mode, and target; **Stop** immediately revokes active access.
 - Screen Recording and Accessibility are requested separately and remain under
   macOS System Settings. The application cannot silently grant them to itself.
-- Remembering an approved signed app never chooses a target. Every new grant
-  still requires an exact window choice; display grants are always session-only.
+- **Always Allow App** can satisfy a later explicit request only for the same
+  verified requester, signed target app, and previously approved capabilities,
+  and only when exactly one safe Accessibility-bound window matches. Ambiguous
+  windows, requester or target-signature changes, and capability escalation
+  still open the native picker. Application launch remains a separate approval;
+  display grants are always session-only, and legacy consent records remain
+  prompt-only.
 - The native host uses public ScreenCaptureKit, Accessibility, and Core Graphics
   APIs. The optional targeted private-driver path is disabled by default,
   version-gated, and fails closed when unavailable.
@@ -152,11 +157,14 @@ vendor's official documentation on 2026-08-29.
 3. On first run, the native settings window keeps General app access off until
    the user enables it and reports Screen Recording and Accessibility as two
    separate macOS decisions. Turning the switch on grants no target authority.
-4. `computer_request_access` opens native UI. The user chooses an exact window
-   and capabilities, then allows that target, optionally remembers its verified
-   app identity, or denies the request. A remembered app still requires an exact
-   window choice. A separately requested display is session-only and can never
-   be remembered.
+4. `computer_request_access` resolves safe, Accessibility-bound candidates. A
+   first or unmatched request opens native UI, where the user chooses an exact
+   window and then selects **Allow Once**, **Always Allow App**, or **Not Now**.
+   Always Allow is bound to the verified requesting harness, signed target app,
+   and capability set. A later explicit request may reuse it only when one safe
+   window matches; ambiguity still requires exact selection. Application launch
+   has its own approval. A separately requested display is session-only and can
+   never be remembered, and older prompt-every-window records are not upgraded.
 5. The host binds a grant to the connection and selected target identity. It
    revalidates that identity before every capture and action.
 6. The indicator stays visible while a grant is active. Stop, window closure,

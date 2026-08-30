@@ -101,7 +101,7 @@ against a compromised native host or operating system.
 | Threat | Primary controls | Residual risk |
 | --- | --- | --- |
 | Host starts accepting control without an explicit first-run choice | General app access defaults off; preference validation and persistence fail closed; turning it off persists before Emergency Stop | Same-user malware inside the source-alpha trust boundary may tamper with the running development host or its state |
-| An MCP client calls tools without consent | Native target picker; explicit capability grant; no ambient default target | A malicious client can repeatedly ask and create approval fatigue |
+| An MCP client calls tools without consent | A first explicit native decision or an exact versioned policy bound to the verified requester, signed target, and capability ceiling; one safe AX-bound window; mandatory indicator; no ambient default target | A compromised already-approved harness can explicitly request a uniquely resolved window without another app prompt; the rail, Stop, protected-target policy, and action approvals remain important |
 | Client changes an approved high-risk action | Canonical argument digest; integrity-protected modern `requestState` or connection/tool/argument-bound one-shot `approval_request_id`; short expiry | A malicious elicitation-capable client can fabricate approval within an existing native grant; use a client trusted for approval UX or the native fallback |
 | Action lands in another window after focus or timing change | Window/PID/bundle/signing revalidation; frame freshness; focus check; serialized action | macOS focus can change between final check and global event delivery |
 | Window ID is reused | PID, bundle, signing identity, bounds/generation checks; `TARGET_RECREATED`/`WINDOW_CLOSED` fail closed | Public APIs do not expose one perfect universal generation identifier |
@@ -113,9 +113,9 @@ against a compromised native host or operating system.
 | User cannot stop control | Always-visible left-edge indicator; Stop revokes first; disconnect/idle/lock/exit revocation | A frozen WindowServer, invisible display, or compromised host may prevent UI response |
 | Indicator spoofs system consent or target state | Original project UI; non-system styling; bound to target and current grant state | Another app can draw a lookalike; users should verify the target and app identity |
 | Denial of service or event flood | Strict schemas and size caps; per-request deadlines; target serialization; bounded frame cache; cancel method | A permitted client can consume local CPU within configured limits |
-| Path or shell injection through app selectors | Typed app selector; no shell interpolation; canonical path matching only for already-running apps; `launch_if_needed` limited to a separately approved bundle-ID resolution | Launching an approved installed app still executes that app before the exact-window picker appears |
+| Path or shell injection through app selectors | Typed app selector; no shell interpolation; canonical path matching only for already-running apps; `launch_if_needed` limited to a separately approved bundle-ID resolution | Launching an approved installed app still executes that app before later native target selection or unique-window saved-policy resolution |
 | Malicious dependency or build action | Lockfiles; immutable action SHAs; dependency review; CodeQL; SBOM; source-only release; provenance scanner; signed bridge identity in release design | Registry, compiler, or local source-build compromise is not completely eliminated |
-| Unauthorized persistent approval | Bundle ID plus exact designated-requirement digest; policy is not a bearer token; per-app and bulk removal in settings; fresh exact-window grant remains mandatory | A local source-development rebuild changes the ad-hoc code identity and invalidates the old match; production persistence still depends on release-signing hygiene |
+| Unauthorized persistent approval | Verified requester bundle and designated-requirement digest; target bundle and designated-requirement digest; capability ceiling; exact-policy and bulk removal; legacy records remain prompt-only; fresh exact-window grant and rail remain mandatory | A local source-development rebuild invalidates an old identity match; processes sharing an approved GUI harness lineage and production signing hygiene remain residual trust concerns |
 
 ## Protected targets
 
@@ -138,10 +138,16 @@ applications cannot enter that frame. ScreenCaptureKit's window-inclusion mode
 omits the desktop background, Dock, and menu bar; the returned image retains the
 selected display's full coordinate space with those surfaces blanked.
 
-Remembered application approval never chooses a window or creates a live grant.
-Every request still presents an exact target choice, and a display approval is
-never persisted. Turning General app access off leaves remembered decisions on
-disk but prevents their use and immediately revokes active grants.
+Always-allowed application approval never creates ambient or durable live
+authority. It is bound to the verified requesting harness, the target bundle and
+designated signing requirement, and a capability ceiling. A later explicit
+request may reuse it only when fresh inventory and Accessibility binding produce
+exactly one safe matching window. Ambiguity, requester or target-signature
+changes, and capability escalation prompt again. Existing records created under
+the older prompt-every-window policy remain prompt-only until the user makes a
+new explicit Always Allow decision. Display approval is never persisted. Turning
+General app access off leaves saved policies on disk but prevents their use and
+immediately revokes active grants.
 
 ## Prompt-injection guidance for harnesses
 

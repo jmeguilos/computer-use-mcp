@@ -159,12 +159,13 @@ The window owns no target authority. It presents:
 - a persisted **General app access** master switch, off by default;
 - separate Screen Recording and Accessibility rows with refresh actions;
 - a source-development trust-boundary warning when applicable; and
-- remembered signed-app decisions with per-app Remove and confirmed Remove All.
+- requester-bound always-allowed signed-app policies with per-policy Remove and
+  confirmed Remove All.
 
 Turning General app access off persists the off state before Emergency Stop
 revokes active grants. A read or persistence error must leave the policy off.
 Turning it on only permits native access requests; it does not modify TCC, select
-a target, or activate remembered app authority.
+a target, or create ambient app authority.
 
 ## Permission and grant layers
 
@@ -175,7 +176,7 @@ There are four separate layers:
 | macOS TCC | Screen Recording, Accessibility | Application identity; system-defined | System Settings / MDM |
 | Native master policy | Permission to accept computer-use requests | This host, persisted; off by default | General app access switch |
 | Bridge connection | Named native protocol capabilities | One authenticated local client connection | Native host handshake |
-| Target grant | Observe, interact, clipboard write | Selected window; explicit display exception | Native approval UI |
+| Target grant | Observe, interact, clipboard write | Selected window; explicit display exception | Native approval UI or exact requester-bound saved policy |
 
 Passing one layer never bypasses another. In particular, macOS Screen Recording
 permission is system-wide for the app, while Computer Use MCP's window boundary
@@ -187,8 +188,10 @@ trust and public event-posting permission, not Input Monitoring.
 
 1. A client starts the MCP adapter and calls `computer_request_access` with an
    app selector, reason, and requested capabilities.
-2. The native host verifies that General app access is on and required TCC state
-   is present, presents its own target picker, and records the user's decision.
+2. The native host verifies that General app access and required TCC state are
+   present, resolves safe Accessibility-bound candidates, and either applies an
+   exact matching saved policy to one unique window or presents its target
+   picker. App launch remains a separate approval.
 3. A granted window is bound to its opaque window identifier, PID, bundle
    identifier, and signing identity when available. The connection receives
    an opaque `grant_id`, never an ambient host handle. Internal connection and
@@ -200,13 +203,17 @@ trust and public event-posting permission, not Input Monitoring.
    client disconnect, connection idle timeout, host exit, session lock, or
    policy revocation.
 
-`always_allow_app` remembers a native approval policy for a matching signed app;
-it does not preserve a bearer token or an unbounded live session. Every new
-connection still receives fresh opaque IDs and is subject to the master switch,
-current TCC, and target state. Remembering an app never selects a concrete
-window: every new grant requires an exact-window choice, including a sole or
-newly created window. Removing a remembered app affects future requests, not an
-already active grant.
+`always_allow_app` remembers a native approval policy keyed to both the verified
+requesting harness identity and the signed target application, plus the approved
+capability set. It does not preserve a bearer token or an unbounded live session.
+Every request still receives fresh connection-bound authority and is subject to
+the master switch, current TCC, protected-target policy, fresh Accessibility
+binding, target lock, and mandatory indicator. A later explicit request may skip
+the app prompt only when exactly one safe window matches and the requested
+capabilities are a subset of the saved policy. Multiple matches, changed signing
+identity, a different requester, or capability escalation opens the native
+picker. Legacy consent records are prompt-only and are never upgraded silently.
+Removing an always-allowed app affects future requests, not an active grant.
 
 A display grant follows the same master-policy and TCC checks, but is approved
 separately for one display, is session-only, has no Accessibility tree, and is

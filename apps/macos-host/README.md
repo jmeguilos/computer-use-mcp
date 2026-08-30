@@ -29,11 +29,15 @@ keeps the persisted **General app access** switch off by default. That switch is
 the native master policy: off denies operations that could expose or control
 another app while status and Stop remain available; turning it off also revokes
 active grants. Turning it on only lets clients present access requests. It does
-not change TCC, approve an app, or choose a target. Every window grant requires
-an exact window choice even when the signed app identity is remembered, and
-display grants are always session-only. The same window can be reopened from
-**Computer Control Settings…** in the menu-bar item and supports per-app or bulk removal
-of remembered decisions. See [Onboarding and settings](../../docs/ONBOARDING.md).
+not change TCC, approve an app, or choose a target. **Always Allow App** can
+satisfy a later explicit request only for the same verified requester, signed
+target, and capability subset when exactly one safe Accessibility-bound window
+matches. Ambiguity and capability escalation return to the native picker. A
+requester or target-signature change also requires a new decision. Application
+launch remains separately approved, display grants are
+always session-only, and legacy decisions remain prompt-only. **Computer Control
+Settings…** in the menu-bar item supports exact-policy or bulk removal. See
+[Onboarding and settings](../../docs/ONBOARDING.md).
 
 Each active target exposes a local Stop on its edge indicator; the menu-bar item
 also provides Emergency Stop for all grants. This explicit Stop is the v1 human

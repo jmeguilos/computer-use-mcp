@@ -329,7 +329,14 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         var mapping: [String: PersistentAppConsent] = [:]
         var identifiersByKey: [String: String] = [:]
         let rows = records.map { record -> ComputerControlRememberedApp in
-            let consentKey = "\(record.bundleIdentifier)\n\(record.signingIdentity)"
+            let consentKey = [
+                String(record.recordVersion),
+                record.policy.rawValue,
+                record.requesterBundleIdentifier ?? "",
+                record.requesterSigningIdentity ?? "",
+                record.bundleIdentifier,
+                record.signingIdentity,
+            ].joined(separator: "\n")
             let identifier = rememberedUIIdentifierByConsentKey[consentKey] ?? UUID().uuidString
             identifiersByKey[consentKey] = identifier
             mapping[identifier] = record
@@ -341,8 +348,20 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
                 ) == record.signingIdentity
             }
             let name = matching?.localizedName ?? "App unavailable"
-            let access = NativeAccessPromptText.capabilityLabels(record.capabilities)
+            let capabilitySummary = NativeAccessPromptText.capabilityLabels(record.capabilities)
                 .joined(separator: ", ")
+            let targetSigner = Self.signingFingerprint(record.signingIdentity)
+            let access: String
+            if record.policy == .autoGrantUniqueWindow,
+               let requester = record.requesterBundleIdentifier,
+               let requesterSigningIdentity = record.requesterSigningIdentity {
+                access = "Requester: \(requester) • requester sig " +
+                    "\(Self.signingFingerprint(requesterSigningIdentity)) • " +
+                    "target sig \(targetSigner) • \(capabilitySummary)"
+            } else {
+                access = "Legacy prompt-only decision • target sig \(targetSigner) • " +
+                    "Fresh Always Allow approval required • \(capabilitySummary)"
+            }
             return ComputerControlRememberedApp(
                 id: identifier,
                 displayName: name,
@@ -353,6 +372,16 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         rememberedByUIIdentifier = mapping
         rememberedUIIdentifierByConsentKey = identifiersByKey
         return rows
+    }
+
+    private static func signingFingerprint(_ identity: String) -> String {
+        let sanitized = NativeUISanitizer.escaped(
+            identity,
+            maximumInputUTF16: 512,
+            maximumOutputUTF16: 1_024
+        )
+        guard sanitized.count > 12 else { return sanitized }
+        return String(sanitized.prefix(12)) + "…"
     }
 
     private func renderStatusMenu(
@@ -506,18 +535,18 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         guard let record = rememberedByUIIdentifier[identifier] else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove remembered app access?"
+        alert.messageText = "Remove saved app access?"
+        let requester = record.requesterBundleIdentifier.map {
+            " from \(NativeUISanitizer.escaped($0, maximumInputUTF16: 512, maximumOutputUTF16: 1_024))"
+        } ?? ""
         alert.informativeText =
-            "Future requests from \(NativeUISanitizer.escaped(record.bundleIdentifier, maximumInputUTF16: 512, maximumOutputUTF16: 1_024)) will require a fresh app decision. Active grants are unchanged."
+            "Future requests\(requester) for \(NativeUISanitizer.escaped(record.bundleIdentifier, maximumInputUTF16: 512, maximumOutputUTF16: 1_024)) will require a fresh app decision. Active grants are unchanged."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task {
             do {
-                try await consentStore?.revoke(
-                    bundleIdentifier: record.bundleIdentifier,
-                    signingIdentity: record.signingIdentity
-                )
+                try await consentStore?.revoke(record)
             } catch {
                 presentSettingsError(
                     title: "Could not remove saved access",
@@ -531,7 +560,7 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
     private func removeAllRememberedApps() {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove all remembered app access?"
+        alert.messageText = "Remove all saved app access?"
         alert.informativeText =
             "Every future request will require a fresh app decision and an exact target choice. Active grants are unchanged."
         alert.addButton(withTitle: "Remove All")

@@ -42,4 +42,25 @@ describe("ApprovalRegistry", () => {
       registry.assertRetry("computer_click", { ...args, approval_request_id: requestId })
     ).toThrow(/unknown or expired/u);
   });
+
+  it("drops retry tokens when their native grant is revoked", () => {
+    const registry = new ApprovalRegistry(() => Date.parse("2026-01-01T00:00:00Z"));
+    registry.remember(
+      "computer_click",
+      args,
+      "approval-request-123456",
+      "2026-01-01T00:01:00Z"
+    );
+    registry.remember(
+      "computer_click",
+      { ...args, grant_id: "grant-other-123456" },
+      "approval-request-other-123456",
+      "2026-01-01T00:01:00Z"
+    );
+
+    registry.retainGrants(new Set(["grant-other-123456"]));
+    expect(registry.pendingCount()).toBe(1);
+    registry.revokeGrant("grant-other-123456");
+    expect(registry.pendingCount()).toBe(0);
+  });
 });

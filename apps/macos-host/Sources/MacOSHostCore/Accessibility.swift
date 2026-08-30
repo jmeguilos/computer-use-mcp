@@ -226,6 +226,7 @@ public enum AccessibilityError: String, Error, Codable, Equatable, Sendable {
     case permissionDenied
     case windowNotFound
     case windowMappingAmbiguous
+    case windowBindingChanged
     case staleRevision
     case sessionNotFound
     case elementNotFound
@@ -515,7 +516,7 @@ public actor AccessibilityController: AccessibilityServing {
             throw AccessibilityError.permissionDenied
         }
         let current = try mapWindow(window)
-        guard CFEqual(binding.element, current) else { throw AccessibilityError.windowNotFound }
+        guard CFEqual(binding.element, current) else { throw AccessibilityError.windowBindingChanged }
     }
 
     /// Revalidates the concrete AX window retained for a live grant. Public
@@ -529,10 +530,10 @@ public actor AccessibilityController: AccessibilityServing {
             throw AccessibilityError.permissionDenied
         }
         guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
-        guard session.window.identity == window.identity else { throw AccessibilityError.windowNotFound }
+        guard session.window.identity == window.identity else { throw AccessibilityError.windowBindingChanged }
         let current = try mapWindow(window)
         guard CFEqual(session.windowElement.element, current) else {
-            throw AccessibilityError.windowNotFound
+            throw AccessibilityError.windowBindingChanged
         }
     }
 

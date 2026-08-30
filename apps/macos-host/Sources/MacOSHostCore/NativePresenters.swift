@@ -75,7 +75,7 @@ public enum NativeAccessPromptText {
         let capabilities = capabilityLabels(request.capabilities).joined(separator: ", ")
         return "Requester: \(requester)\nApplication identity: \(bundle)\n" +
             "Requested access: \(capabilities)\nRequester-provided reason: \(reason)\n\n" +
-            "Opening the app does not grant control. A separate exact-window choice is always required."
+            "Opening the app does not grant control. After launch, the host will either ask for an exact-window choice or, when an existing Always Allow App policy resolves to exactly one safe window, create a fresh visible exact-window grant."
     }
 
     public static func accessDetails(_ request: AccessApprovalRequest) -> String {
@@ -257,6 +257,118 @@ public enum IndicatorVisibility {
     }
 }
 
+/// Window-list queries return z-ordered dictionaries and may contain many
+/// surfaces. Indicator authority is bound to one concrete WindowServer ID, so
+/// callers must never infer identity from list order.
+enum IndicatorWindowInfoLookup {
+    static func exactEntry(
+        in entries: [[String: Any]],
+        windowID: UInt32
+    ) -> [String: Any]? {
+        entries.first { entry in
+            (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
+        }
+    }
+}
+
+/// A single WindowServer inventory miss can occur while a window changes
+/// focus, Space, or visibility. Keep the detached status panel visible during
+/// that bounded transition, but revoke after repeated misses. Action-time host
+/// revalidation remains fail-closed throughout the grace interval.
+struct IndicatorTransientMissTracker: Equatable, Sendable {
+    static let defaultLimit = 3
+
+    let limit: Int
+    private(set) var consecutiveMisses = 0
+
+    init(limit: Int = defaultLimit) {
+        self.limit = max(1, limit)
+    }
+
+    mutating func recordPresent() {
+        consecutiveMisses = 0
+    }
+
+    /// Returns true when the bounded miss limit has been reached.
+    mutating func recordMissing() -> Bool {
+        consecutiveMisses = min(limit, consecutiveMisses + 1)
+        return consecutiveMisses >= limit
+    }
+}
+
+/// Restoring focus is safe only while the helper still owns the foreground.
+/// If the user switched elsewhere while deciding, their newer choice wins.
+enum NativeApprovalFocusPolicy {
+    static func shouldRestore(
+        priorProcessID: Int32?,
+        currentProcessID: Int32?,
+        hostProcessID: Int32
+    ) -> Bool {
+        guard let priorProcessID,
+              priorProcessID != hostProcessID,
+              currentProcessID == hostProcessID else { return false }
+        return true
+    }
+}
+
+struct NativeAccessApprovalButtonChoice: Equatable, Sendable {
+    let title: String
+    let persistence: GrantPersistence
+}
+
+struct NativeAccessApprovalButtonPlan: Equatable, Sendable {
+    let positiveChoices: [NativeAccessApprovalButtonChoice]
+    let cancelTitle: String
+
+    static func make(
+        displayTarget: Bool,
+        appConsentExists: Bool,
+        candidateCount: Int
+    ) -> NativeAccessApprovalButtonPlan {
+        if displayTarget {
+            return NativeAccessApprovalButtonPlan(
+                positiveChoices: [NativeAccessApprovalButtonChoice(
+                    title: "Allow Display for Session",
+                    persistence: .sessionOnly
+                )],
+                cancelTitle: "Not Now"
+            )
+        }
+        if !appConsentExists {
+            return NativeAccessApprovalButtonPlan(
+                positiveChoices: [
+                    NativeAccessApprovalButtonChoice(
+                        title: "Allow Once",
+                        persistence: .allowOnce
+                    ),
+                    NativeAccessApprovalButtonChoice(
+                        title: "Always Allow App",
+                        persistence: .alwaysAllowApp
+                    ),
+                ],
+                cancelTitle: "Not Now"
+            )
+        }
+        guard candidateCount > 1 else {
+            // A remembered request with one exact candidate is auto-granted by
+            // HostController and must not reach native selection UI. If it ever
+            // does, expose no approval path rather than silently broadening the
+            // remembered-consent contract.
+            return NativeAccessApprovalButtonPlan(
+                positiveChoices: [],
+                cancelTitle: "Not Now"
+            )
+        }
+        return NativeAccessApprovalButtonPlan(
+            positiveChoices: [NativeAccessApprovalButtonChoice(
+                title: "Use Selected Window",
+                persistence: .alwaysAllowApp
+            )],
+            cancelTitle: "Not Now"
+        )
+    }
+}
+
 public enum IndicatorPresentationError: Error, Equatable, Sendable {
     case unavailable
 }
@@ -354,6 +466,7 @@ private final class IndicatorPanelController: NSObject {
     private var trackingTimer: Timer?
     private var targetVisible = true
     private var targetTitle = ""
+    private var transientMisses = IndicatorTransientMissTracker()
 
     init(grantID: UUID, slot: Int, stopGrant: @escaping @Sendable (UUID) async -> Void) {
         self.grantID = grantID
@@ -531,21 +644,22 @@ private final class IndicatorPanelController: NSObject {
             }
             return true
         }
-        guard let entries = CGWindowListCopyWindowInfo(
-            [.optionIncludingWindow, .excludeDesktopElements],
-            CGWindowID(targetWindowID)
-        ) as? [[String: Any]],
-        let entry = entries.first,
+        // Apple requires optionIncludingWindow to be paired with an above/below
+        // option. Use optionAll so hidden, minimized, and other-Space windows
+        // remain eligible, then select the exact numeric ID explicitly.
+        let entries = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        guard let entry = IndicatorWindowInfoLookup.exactEntry(
+            in: entries,
+            windowID: targetWindowID
+        ),
         let bounds = entry[kCGWindowBounds as String] as? [String: Any],
         let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else {
-            targetVisible = false
-            updateTargetLabel()
-            // `optionIncludingWindow` also returns hidden/minimized windows.
-            // Absence therefore means the exact target has gone away, not a
-            // reason to keep authority behind a detached status panel.
-            failClosed(revokeGrant: revokeIdentityChange)
-            return false
+            return handleMissingTarget(revokeIdentityChange: revokeIdentityChange)
         }
+        transientMisses.recordPresent()
         if let targetIdentity {
             let ownerPID = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
             let running = NSRunningApplication(processIdentifier: targetIdentity.processID)
@@ -606,6 +720,33 @@ private final class IndicatorPanelController: NSObject {
         }
         guard updatePlacement() else {
             failClosed(revokeGrant: revokeIdentityChange)
+            return false
+        }
+        return true
+    }
+
+    private func handleMissingTarget(revokeIdentityChange: Bool) -> Bool {
+        targetVisible = false
+        updateTargetLabel()
+        guard revokeIdentityChange else {
+            failClosed(revokeGrant: false)
+            return false
+        }
+        guard !transientMisses.recordMissing() else {
+            failClosed(revokeGrant: true)
+            return false
+        }
+
+        // Keep attribution visible without attaching to any unrelated app while
+        // WindowServer settles. Failure to present that status panel remains an
+        // immediate fail-closed condition.
+        guard updatePlacement() else {
+            failClosed(revokeGrant: true)
+            return false
+        }
+        panel.orderFrontRegardless()
+        guard panel.isVisible else {
+            failClosed(revokeGrant: true)
             return false
         }
         return true
@@ -801,6 +942,43 @@ private func runCancellableModal(
     return monitor.wasCancelled ? .abort : response
 }
 
+@MainActor
+private func runForegroundCancellableModal(
+    _ alert: NSAlert,
+    cancellation: any InteractionCancellationChecking
+) -> NSApplication.ModalResponse {
+    do {
+        try cancellation.check()
+    } catch {
+        alert.window.orderOut(nil)
+        return .abort
+    }
+    let focusManager = MacApplicationFocusManager()
+    let priorFocus = try? focusManager.capture()
+    let hostProcessID = ProcessInfo.processInfo.processIdentifier
+
+    // Set capture exclusion before the alert is ever ordered onscreen. The host
+    // is an accessory app, so explicitly activate it and raise the security UI.
+    alert.window.sharingType = .none
+    NSApp.activate(ignoringOtherApps: true)
+    alert.window.orderFrontRegardless()
+
+    let response = runCancellableModal(alert, cancellation: cancellation)
+    let currentProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    // stopModal does not guarantee that an accessory-app alert is removed on
+    // every early-abort path. Never leave stale approval UI onscreen.
+    alert.window.orderOut(nil)
+    if let priorFocus,
+       NativeApprovalFocusPolicy.shouldRestore(
+            priorProcessID: priorFocus.processID,
+            currentProcessID: currentProcessID,
+            hostProcessID: hostProcessID
+       ) {
+        _ = focusManager.restore(priorFocus)
+    }
+    return response
+}
+
 public struct NativeAccessApprovalPresenter: AccessApprovalPresenting {
     public init() {}
 
@@ -815,7 +993,10 @@ public struct NativeAccessApprovalPresenter: AccessApprovalPresenting {
             alert.informativeText = NativeAccessPromptText.launchDetails(request)
             alert.addButton(withTitle: "Launch App")
             alert.addButton(withTitle: "Deny")
-            return runCancellableModal(alert, cancellation: cancellation) == .alertFirstButtonReturn
+            return runForegroundCancellableModal(
+                alert,
+                cancellation: cancellation
+            ) == .alertFirstButtonReturn
         }
     }
 
@@ -830,22 +1011,36 @@ public struct NativeAccessApprovalPresenter: AccessApprovalPresenting {
             alert.informativeText = "Choose from verified metadata. No target preview is captured before you approve access."
             let picker = NativeAccessTargetPickerView(request: request)
             alert.accessoryView = picker
-            let allowButton = alert.addButton(
-                withTitle: request.displayTarget ? "Allow Display for Session" : "Allow Selected Window"
+            let buttonPlan = NativeAccessApprovalButtonPlan.make(
+                displayTarget: request.displayTarget,
+                appConsentExists: request.appConsentExists,
+                candidateCount: request.candidates.count
             )
-            allowButton.isEnabled = false
-            picker.onSelectionChanged = { [weak allowButton] hasSelection in
-                allowButton?.isEnabled = hasSelection
+            var persistenceByResponse: [Int: GrantPersistence] = [:]
+            var positiveButtons: [NSButton] = []
+            for (index, choice) in buttonPlan.positiveChoices.enumerated() {
+                let button = alert.addButton(withTitle: choice.title)
+                button.isEnabled = false
+                positiveButtons.append(button)
+                persistenceByResponse[
+                    NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + index
+                ] = choice.persistence
             }
-            alert.addButton(withTitle: "Not Now")
-            let response = runCancellableModal(alert, cancellation: cancellation)
+            picker.onSelectionChanged = { [positiveButtons] hasSelection in
+                positiveButtons.forEach { $0.isEnabled = hasSelection }
+            }
+            alert.addButton(withTitle: buttonPlan.cancelTitle)
+            let response = runForegroundCancellableModal(
+                alert,
+                cancellation: cancellation
+            )
             let selected = picker.selectedIndex.flatMap { index in
                 request.candidates.indices.contains(index) ? request.candidates[index] : nil
             }
-            if response == .alertFirstButtonReturn {
+            if let persistence = persistenceByResponse[response.rawValue] {
                 return AccessApprovalDecision(
                     selected: selected,
-                    persistence: picker.selectedPersistence
+                    persistence: persistence
                 )
             }
             return .denied
@@ -871,7 +1066,10 @@ public struct NativeRiskApprovalPresenter: RiskApprovalPresenting {
             )
             alert.addButton(withTitle: "Approve Once")
             alert.addButton(withTitle: "Deny")
-            return runCancellableModal(alert, cancellation: cancellation) == .alertFirstButtonReturn
+            return runForegroundCancellableModal(
+                alert,
+                cancellation: cancellation
+            ) == .alertFirstButtonReturn
         }
     }
 }
