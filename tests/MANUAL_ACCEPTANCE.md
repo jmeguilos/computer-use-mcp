@@ -92,8 +92,10 @@ For every row, complete this sequence on a fresh MCP connection:
 4. capture state, verify the screenshot/Accessibility bounds, and confirm the
    left-edge rail is absent from captured pixels;
 5. perform one harmless frame-bound action and verify the fixture result;
-6. trigger one risky fixture action, approve the exact unchanged action through
-   that client's supported route, and verify changed arguments are rejected;
+6. target the redacted fixture Passcode with `computer_set_value`, approve the
+   exact unchanged high-risk action through that client's supported route,
+   verify changed arguments are rejected, then recapture and confirm the secure
+   node still exposes no title, label, value, or actions;
 7. press the native **Stop** control and verify capture and action calls fail;
 8. disconnect and verify the host reports no grant from that connection.
 

@@ -23,10 +23,18 @@ public struct AccessibilityNodeSnapshot: Codable, Equatable, Sendable {
 /// classification must consider the subrole: macOS commonly reports a generic
 /// AXTextField role with AXSecureTextField as its subrole.
 public enum AccessibilityProjection {
+    public static func isDirectSecureTextField(role: String, subrole: String?) -> Bool {
+        role == "AXSecureTextField" || subrole == "AXSecureTextField"
+    }
+
+    public static func isProtectedContent(role: String, subrole: String?) -> Bool {
+        role == "AXProtectedContent" || subrole == "AXProtectedContent"
+    }
+
     public static func isSecure(role: String, subrole: String?, ancestorSecure: Bool = false) -> Bool {
         ancestorSecure ||
-            role == "AXSecureTextField" || subrole == "AXSecureTextField" ||
-            role == "AXProtectedContent" || subrole == "AXProtectedContent"
+            isDirectSecureTextField(role: role, subrole: subrole) ||
+            isProtectedContent(role: role, subrole: subrole)
     }
 
     public static func redactedStrings(
@@ -42,6 +50,33 @@ public enum AccessibilityProjection {
 
     public static func boundedCharacterCount(_ values: [String]) -> Int {
         values.reduce(0) { $0 + $1.utf16.count }
+    }
+}
+
+/// A secure field is write-only from the host's perspective. Only a direct
+/// secure text control can accept an exact, already-approved value write.
+/// Protected content, secure descendants, and ambiguous ancestry stay denied.
+public enum AccessibilitySecureElementPolicy {
+    public static func allowsValueWrite(
+        role: String,
+        subrole: String?,
+        secureAncestorOrAmbiguity: Bool,
+        authorization: AccessibilityValueWriteAuthorization
+    ) -> Bool {
+        guard !secureAncestorOrAmbiguity else { return false }
+        guard !AccessibilityProjection.isProtectedContent(role: role, subrole: subrole) else {
+            return false
+        }
+        let directSecure = AccessibilityProjection.isDirectSecureTextField(
+            role: role,
+            subrole: subrole
+        )
+        switch authorization {
+        case .ordinary:
+            return !directSecure
+        case .approvedDirectSecure:
+            return directSecure
+        }
     }
 }
 
@@ -101,9 +136,18 @@ public actor AccessibilityFrameSnapshotStore {
     }
 }
 
+public enum AccessibilityValueWriteAuthorization: Equatable, Sendable {
+    case ordinary
+    case approvedDirectSecure
+}
+
 public enum AccessibilityCommand: Equatable, Sendable {
     case perform(nodeID: Int, action: String?)
-    case setValue(nodeID: Int, value: String)
+    case setValue(
+        nodeID: Int,
+        value: String,
+        authorization: AccessibilityValueWriteAuthorization
+    )
     case focus(nodeID: Int)
 }
 
@@ -298,13 +342,14 @@ public actor AccessibilityController: AccessibilityServing {
             }
         }
         let windowElement = priorSession?.windowElement.element ?? mappedWindowElement
+        let expectedApplication = AXUIElementCreateApplication(window.identity.processID)
         var nodes: [AccessibilityNodeSnapshot] = []
         var elements: [Int: AXElementBox] = [:]
         var truncated = false
         var nextID = 0
         var emittedCharacters = 0
 
-        func visit(_ element: AXUIElement, parentID: Int?, depth: Int, ancestorSecure: Bool) {
+        func visit(_ element: AXUIElement, parentID: Int?, depth: Int) {
             guard !truncated else { return }
             guard nodes.count < maximumNodes, depth <= maximumDepth,
                   emittedCharacters < maximumCharacters else {
@@ -315,21 +360,20 @@ public actor AccessibilityController: AccessibilityServing {
             nextID += 1
             let role = AXHelpers.stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
             let subrole = AXHelpers.stringAttribute(element, kAXSubroleAttribute)
-            let projected = AccessibilityProjection.redactedStrings(
-                role: role,
-                subrole: subrole,
-                title: AXHelpers.limited(AXHelpers.stringAttribute(element, kAXTitleAttribute)),
-                label: AXHelpers.limited(AXHelpers.stringAttribute(element, kAXDescriptionAttribute)),
-                value: AXHelpers.limited(AXHelpers.displayValue(element))
-            )
-            let secure = AccessibilityProjection.isSecure(
-                role: role,
-                subrole: subrole,
-                ancestorSecure: ancestorSecure
+            // Determine protection before querying any content-bearing AX
+            // attribute. Secure fields and descendants are write-only: their
+            // title, description, value, and actions are never read.
+            let secure = AXHelpers.isSecure(
+                element,
+                expectedApplication: expectedApplication
             )
             let strings: (title: String?, label: String?, value: String?) = secure
                 ? (title: nil, label: nil, value: nil)
-                : (title: projected.title, label: projected.label, value: projected.value)
+                : (
+                    title: AXHelpers.limited(AXHelpers.stringAttribute(element, kAXTitleAttribute)),
+                    label: AXHelpers.limited(AXHelpers.stringAttribute(element, kAXDescriptionAttribute)),
+                    value: AXHelpers.limited(AXHelpers.displayValue(element))
+                )
             let position = AXHelpers.pointAttribute(element, kAXPositionAttribute)
             let size = AXHelpers.sizeAttribute(element, kAXSizeAttribute)
             let frame: Rect?
@@ -365,12 +409,12 @@ public actor AccessibilityController: AccessibilityServing {
             nodes.append(snapshot)
             elements[id] = AXElementBox(element)
             for child in AXHelpers.elementArrayAttribute(element, kAXChildrenAttribute) {
-                visit(child, parentID: id, depth: depth + 1, ancestorSecure: secure)
+                visit(child, parentID: id, depth: depth + 1)
                 if truncated { break }
             }
         }
 
-        visit(windowElement, parentID: nil, depth: 0, ancestorSecure: false)
+        visit(windowElement, parentID: nil, depth: 0)
         let revision = (priorSession?.revision ?? 0) + 1
         sessions[sessionID] = AccessibilitySession(
             window: window,
@@ -396,20 +440,33 @@ public actor AccessibilityController: AccessibilityServing {
         try cancellation.check()
         guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
         guard session.revision == revision else { throw AccessibilityError.staleRevision }
+        let expectedApplication = AXUIElementCreateApplication(session.window.identity.processID)
 
         switch command {
         case .perform(let nodeID, let requestedAction):
             guard let element = session.elements[nodeID]?.element else { throw AccessibilityError.elementNotFound }
-            guard !AXHelpers.isSecure(element) else { throw AccessibilityError.secureElement }
+            guard !AXHelpers.isSecure(element, expectedApplication: expectedApplication) else {
+                throw AccessibilityError.secureElement
+            }
             let action = requestedAction ?? (kAXPressAction as String)
             guard AXHelpers.actionNames(element).contains(action) else { throw AccessibilityError.actionUnsupported }
             try cancellation.check()
             guard AXUIElementPerformAction(element, action as CFString) == .success else {
                 throw AccessibilityError.operationFailed
             }
-        case .setValue(let nodeID, let value):
+        case .setValue(let nodeID, let value, let authorization):
             guard let element = session.elements[nodeID]?.element else { throw AccessibilityError.elementNotFound }
-            guard !AXHelpers.isSecure(element) else { throw AccessibilityError.secureElement }
+            let role = AXHelpers.stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
+            let subrole = AXHelpers.stringAttribute(element, kAXSubroleAttribute)
+            guard AccessibilitySecureElementPolicy.allowsValueWrite(
+                role: role,
+                subrole: subrole,
+                secureAncestorOrAmbiguity: AXHelpers.hasSecureAncestorOrAmbiguity(
+                    element,
+                    expectedApplication: expectedApplication
+                ),
+                authorization: authorization
+            ) else { throw AccessibilityError.secureElement }
             var settable = DarwinBoolean(false)
             guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
                   settable.boolValue else {
@@ -551,7 +608,10 @@ public actor AccessibilityController: AccessibilityServing {
         guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
         guard session.revision == revision else { throw AccessibilityError.staleRevision }
         guard let element = session.elements[nodeID]?.element else { throw AccessibilityError.elementNotFound }
-        return Self.actionDescriptor(element)
+        return Self.actionDescriptor(
+            element,
+            expectedApplication: AXUIElementCreateApplication(session.window.identity.processID)
+        )
     }
 
     public func describeFocusedActionTarget(
@@ -566,17 +626,23 @@ public actor AccessibilityController: AccessibilityServing {
         guard focused.count == 1, let element = focused.first else {
             throw AccessibilityError.elementNotFound
         }
-        return Self.actionDescriptor(element)
+        return Self.actionDescriptor(
+            element,
+            expectedApplication: AXUIElementCreateApplication(session.window.identity.processID)
+        )
     }
 
-    private static func actionDescriptor(_ element: AXUIElement) -> AccessibilityActionDescriptor {
+    private static func actionDescriptor(
+        _ element: AXUIElement,
+        expectedApplication: AXUIElement
+    ) -> AccessibilityActionDescriptor {
         let role = AXHelpers.stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
-        let secure = AXHelpers.isSecure(element)
+        let secure = AXHelpers.isSecure(element, expectedApplication: expectedApplication)
         return AccessibilityActionDescriptor(
             role: role,
             label: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXDescriptionAttribute)),
             secure: secure,
-            actions: AXHelpers.actionNames(element),
+            actions: secure ? [] : AXHelpers.actionNames(element),
             frame: {
                 guard let position = AXHelpers.pointAttribute(element, kAXPositionAttribute),
                       let size = AXHelpers.sizeAttribute(element, kAXSizeAttribute) else { return nil }
@@ -587,7 +653,10 @@ public actor AccessibilityController: AccessibilityServing {
             identifier: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXIdentifierAttribute)),
             help: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXHelpAttribute)),
             placeholder: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXPlaceholderValueAttribute)),
-            semanticContext: secure ? [] : AXHelpers.semanticAncestry(element)
+            semanticContext: secure ? [] : AXHelpers.semanticAncestry(
+                element,
+                expectedApplication: expectedApplication
+            )
         )
     }
 
@@ -638,7 +707,10 @@ public actor AccessibilityController: AccessibilityServing {
         guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
         guard session.revision == revision else { throw AccessibilityError.staleRevision }
         guard let element = session.elements[nodeID]?.element else { throw AccessibilityError.elementNotFound }
-        guard !AXHelpers.isSecure(element) else {
+        guard !AXHelpers.isSecure(
+            element,
+            expectedApplication: AXUIElementCreateApplication(session.window.identity.processID)
+        ) else {
             throw AccessibilityError.secureElement
         }
         guard let fullValue = AXHelpers.stringAttribute(element, kAXValueAttribute) else {
@@ -757,20 +829,49 @@ enum AXHelpers {
         return (actions as? [String] ?? []).sorted()
     }
 
-    static func isSecure(_ element: AXUIElement) -> Bool {
-        var current: AXUIElement? = element
+    static func isSecure(
+        _ element: AXUIElement,
+        expectedApplication: AXUIElement
+    ) -> Bool {
+        let role = stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
+        let subrole = stringAttribute(element, kAXSubroleAttribute)
+        if AccessibilityProjection.isSecure(role: role, subrole: subrole) { return true }
+        return hasSecureAncestorOrAmbiguity(
+            element,
+            expectedApplication: expectedApplication
+        )
+    }
+
+    /// Returns true for a secure ancestor and for ancestry that cannot be
+    /// resolved within the strict depth bound. The latter is deliberately
+    /// treated as ambiguous and therefore protected.
+    static func hasSecureAncestorOrAmbiguity(
+        _ element: AXUIElement,
+        expectedApplication: AXUIElement
+    ) -> Bool {
+        var current = element
+        var visited: [AXUIElement] = []
         for _ in 0..<16 {
-            guard let candidate = current else { return false }
+            // Only the concrete application element for the granted PID is an
+            // accepted root. AX role strings are target-controlled metadata
+            // and cannot prove that a parent chain reached that root.
+            if CFEqual(current, expectedApplication) {
+                return false
+            }
+            guard let parentValue = copyAttribute(current, kAXParentAttribute),
+                  CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return true }
+            let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
+            guard !CFEqual(current, parent),
+                  !visited.contains(where: { CFEqual($0, parent) }) else { return true }
             if AccessibilityProjection.isSecure(
-                role: stringAttribute(candidate, kAXRoleAttribute) ?? "AXUnknown",
-                subrole: stringAttribute(candidate, kAXSubroleAttribute)
+                role: stringAttribute(parent, kAXRoleAttribute) ?? "AXUnknown",
+                subrole: stringAttribute(parent, kAXSubroleAttribute)
             ) { return true }
-            guard let parent = copyAttribute(candidate, kAXParentAttribute),
-                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
-            current = unsafeBitCast(parent, to: AXUIElement.self)
+            visited.append(current)
+            current = parent
         }
         // A pathological ancestry cycle or excessive depth is ambiguous; fail
-        // closed rather than inspecting or mutating potentially protected data.
+        // closed rather than mutating potentially protected data.
         return true
     }
 
@@ -780,10 +881,11 @@ enum AXHelpers {
     /// queried here.
     static func semanticAncestry(
         _ element: AXUIElement,
+        expectedApplication: AXUIElement,
         maximumDepth: Int = 8,
         maximumCharacters: Int = 4_096
     ) -> [String] {
-        guard !isSecure(element) else { return [] }
+        guard !isSecure(element, expectedApplication: expectedApplication) else { return [] }
         var context: [String] = []
         var retainedCharacters = 0
         var current: AXUIElement? = {

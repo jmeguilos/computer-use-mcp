@@ -155,7 +155,7 @@ coordinate never overrides it.
 | `computer_press_key` | `key`, `modifiers` |
 | `computer_type_text` | `text`, `interval_ms` |
 | `computer_paste` | `text`, optional `format: "text"`; requires `clipboard_write` |
-| `computer_set_value` | element `selector`, `value` |
+| `computer_set_value` | element `selector`, `value`; a direct secure text field requires exact high-risk approval and remains unreadable |
 | `computer_select_text` | element `selector`, `text`, optional `prefix`/`suffix`, `selection_type` |
 | `computer_perform_secondary_action` | element `selector`, named `action` |
 

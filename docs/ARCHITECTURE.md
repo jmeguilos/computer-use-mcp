@@ -264,6 +264,15 @@ the frame-bound Accessibility snapshot identifies one non-secure destination.
 Secure or ambiguous destinations show payload length and format with the preview
 hidden. Neither form is copied into audit metadata.
 
+Secure text controls are write-only. Their title, label, value, and actions stay
+redacted from state, and selection remains denied. A direct
+`AXSecureTextField` may accept `computer_set_value` only after the action's
+high-risk one-shot approval has been consumed. `AXProtectedContent`, a generic
+element below a secure ancestor, or an ambiguous ancestry chain remains denied
+even with an approval token. An ancestry chain is accepted only when it reaches
+the concrete `AXUIElement` for the granted application's PID; role text alone is
+not treated as proof of the root.
+
 ## Concurrency and cancellation
 
 Requests carry deadlines. The native bridge supports cancellation by request ID,
@@ -287,8 +296,8 @@ concurrently, but a capture cannot extend a revoked grant.
 
 - remote or multi-user computer control;
 - a hidden daemon with unattended control;
-- bypassing TCC, secure input, protected content, lock screen, or application
-  security boundaries;
+- bypassing TCC, secure-input safeguards, protected content, lock screen, or
+  application security boundaries;
 - locked use, lock-screen control, or unattended authentication;
 - promising background coordinate input on macOS;
 - OCR, keystroke capture, clipboard read, or persistent screenshot history;

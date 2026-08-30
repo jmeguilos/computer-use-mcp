@@ -2824,3 +2824,705 @@ private actor FixtureWireHandler: HostMethodHandling {
     func emergencyStop() async {}
     func maintenance(now: Date) async {}
 }
+
+@Suite("Secure value-write approval dispatch")
+struct SecureValueWriteApprovalDispatchTests {
+    @Test func exactApprovedRetryDispatchesOnlyTheApprovedSecureWrite() async throws {
+        let window = try makeWindow(
+            id: 9_901,
+            bundle: "com.example.secure-write-fixture",
+            title: "Secure Value Write Fixture"
+        )
+        let capture = try SecureWriteCaptureFixture(window: window)
+        let accessibility = SecureWriteAccessibilityFixture()
+        let controller = HostController(
+            capture: capture,
+            accessibility: accessibility,
+            permissions: GrantedPermissionFixture(),
+            syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
+            accessPresenter: LaunchAcceptingPresenterFixture()
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()),
+                processID: 9_900,
+                name: "secure-write-test-harness",
+                instanceID: "secure-write-test"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        func context(_ requestID: String) -> HostRequestContext {
+            HostRequestContext(
+                requestID: requestID,
+                connection: connection,
+                deadline: Date().addingTimeInterval(10)
+            )
+        }
+
+        let access = try await controller.handle(
+            method: "requestAccess",
+            params: .object([
+                "target": .object([
+                    "kind": .string("window"),
+                    "app": .object([
+                        "kind": .string("bundle_id"),
+                        "value": .string(window.identity.bundleIdentifier),
+                    ]),
+                    "launchIfNeeded": .bool(false),
+                ]),
+                "reason": .string("Exercise approved secure value dispatch"),
+                "capabilities": .array([.string("observe"), .string("interact")]),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("secure-write-access")
+        )
+        let grantID = try #require(
+            access.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+
+        let state = try await controller.handle(
+            method: "getState",
+            params: .object([
+                "grantId": .string(grantID.uuidString),
+                "screenshot": .string("none"),
+                "maxWidthPx": .number(1_024),
+                "includeAccessibility": .bool(true),
+                "maxAccessibilityChars": .number(10_000),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("secure-write-state")
+        )
+        let frameID = try #require(
+            state.objectValue?["frameId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+        guard case .array(let nodes)? = state.objectValue?["accessibility"]?.objectValue?["nodes"],
+              let secureNode = nodes.compactMap(\.objectValue).first(where: {
+                  $0["elementId"] == .string("element-1")
+              }) else {
+            Issue.record("secure Accessibility fixture node was not returned")
+            return
+        }
+        #expect(secureNode["secure"] == .bool(true))
+        #expect(secureNode["value"] == nil)
+        #expect(secureNode["title"] == nil)
+        #expect(secureNode["label"] == nil)
+        #expect(secureNode["actions"] == .array([]))
+
+        let canary = "CANARY-approved-secure-write"
+        func action(value: String, approvalID: UUID? = nil) -> JSONValue {
+            var object: [String: JSONValue] = [
+                "kind": .string("setValue"),
+                "grantId": .string(grantID.uuidString),
+                "frameId": .string(frameID.uuidString),
+                "intent": .string("Fill the exact secure fixture field"),
+                "approvalMode": .string("elicitation"),
+                "timeoutMs": .number(5_000),
+                "selector": .object([
+                    "kind": .string("element"),
+                    "elementId": .string("element-1"),
+                ]),
+                "value": .string(value),
+            ]
+            if let approvalID {
+                object["approvalRequestId"] = .string(approvalID.uuidString)
+            }
+            return .object(object)
+        }
+
+        let challengeID: UUID
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: action(value: canary),
+                context: context("secure-write-before-approval")
+            )
+            Issue.record("secure value write executed without approval")
+            return
+        } catch let error as WireError {
+            #expect(error.code == "approval_required")
+            #expect(error.details?.objectValue?["riskTier"] == .string("high"))
+            #expect(!error.message.contains(canary))
+            challengeID = try #require(
+                error.details?.objectValue?["approvalRequestId"]?.stringValue
+                    .flatMap(UUID.init(uuidString:))
+            )
+        }
+        #expect(await accessibility.performedCommands().isEmpty)
+
+        let approval = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(challengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-secure-write")
+        )
+        #expect(approval.objectValue?["disposition"] == .string("approved"))
+
+        let foreignConnection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "f", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()),
+                processID: 9_902,
+                name: "foreign-secure-write-harness",
+                instanceID: "foreign-secure-write-test"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: action(value: canary, approvalID: challengeID),
+                context: HostRequestContext(
+                    requestID: "secure-write-foreign-connection",
+                    connection: foreignConnection,
+                    deadline: Date().addingTimeInterval(10)
+                )
+            )
+            Issue.record("a different connection reused the secure approval")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "ACCESS_DENIED")
+        }
+        #expect(await accessibility.performedCommands().isEmpty)
+
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: action(value: canary + "-changed", approvalID: challengeID),
+                context: context("secure-write-mismatched-retry")
+            )
+            Issue.record("changed secure value consumed approval and executed")
+        } catch let error as WireError {
+            #expect(error.code == "approval_invalid")
+        }
+        #expect(await accessibility.performedCommands().isEmpty)
+
+        let exactChallengeID: UUID
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: action(value: canary),
+                context: context("secure-write-new-challenge")
+            )
+            Issue.record("secure value write executed without a replacement approval")
+            return
+        } catch let error as WireError {
+            #expect(error.code == "approval_required")
+            exactChallengeID = try #require(
+                error.details?.objectValue?["approvalRequestId"]?.stringValue
+                    .flatMap(UUID.init(uuidString:))
+            )
+        }
+        _ = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(exactChallengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-exact-secure-write")
+        )
+
+        let completed = try await controller.handle(
+            method: "action",
+            params: action(value: canary, approvalID: exactChallengeID),
+            context: context("secure-write-approved-retry")
+        )
+        #expect(completed.objectValue?["status"] == .string("completed"))
+        #expect(await accessibility.performedCommands() == [
+            .setValue(nodeID: 1, value: canary, authorization: .approvedDirectSecure),
+        ])
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: action(value: canary, approvalID: exactChallengeID),
+                context: context("secure-write-replayed-retry")
+            )
+            Issue.record("one-shot secure approval was replayed")
+        } catch let error as WireError {
+            #expect(error.code == "approval_invalid")
+        }
+        #expect(await accessibility.performedCommands().count == 1)
+
+        func selectAction(approvalID: UUID? = nil) -> JSONValue {
+            var object: [String: JSONValue] = [
+                "kind": .string("selectText"),
+                "grantId": .string(grantID.uuidString),
+                "frameId": .string(frameID.uuidString),
+                "intent": .string("Select text in the exact secure fixture field"),
+                "approvalMode": .string("elicitation"),
+                "timeoutMs": .number(5_000),
+                "selector": .object([
+                    "kind": .string("element"),
+                    "elementId": .string("element-1"),
+                ]),
+                "text": .string("approved"),
+                "selectionType": .string("text"),
+            ]
+            if let approvalID {
+                object["approvalRequestId"] = .string(approvalID.uuidString)
+            }
+            return .object(object)
+        }
+
+        let selectChallengeID: UUID
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: selectAction(),
+                context: context("secure-select-before-approval")
+            )
+            Issue.record("secure selection bypassed approval and its denial boundary")
+            return
+        } catch let error as WireError {
+            #expect(error.code == "approval_required")
+            #expect(error.details?.objectValue?["riskTier"] == .string("high"))
+            selectChallengeID = try #require(
+                error.details?.objectValue?["approvalRequestId"]?.stringValue
+                    .flatMap(UUID.init(uuidString:))
+            )
+        }
+        _ = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(selectChallengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-secure-select")
+        )
+        do {
+            _ = try await controller.handle(
+                method: "action",
+                params: selectAction(approvalID: selectChallengeID),
+                context: context("secure-select-approved-retry")
+            )
+            Issue.record("approval incorrectly authorized secure text selection")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "ACCESS_DENIED")
+        }
+        #expect(await accessibility.secureSelectionAttemptCount() == 1)
+        #expect(await accessibility.performedCommands().count == 1)
+    }
+
+    @Test func approvedProtectedAndSecureDescendantTargetsNeverDispatch() async throws {
+        let targetDescriptors = [
+            AccessibilityActionDescriptor(
+                role: "AXProtectedContent",
+                label: nil,
+                secure: true,
+                actions: [],
+                frame: Rect(
+                    origin: Point(x: 160, y: 180),
+                    size: Size(width: 240, height: 28)
+                )
+            ),
+            AccessibilityActionDescriptor(
+                role: "AXTextField",
+                label: nil,
+                secure: true,
+                actions: [],
+                frame: Rect(
+                    origin: Point(x: 160, y: 180),
+                    size: Size(width: 240, height: 28)
+                )
+            ),
+        ]
+
+        for (index, descriptor) in targetDescriptors.enumerated() {
+            let window = try makeWindow(
+                id: UInt32(9_911 + index),
+                bundle: "com.example.protected-write-fixture-\(index)",
+                title: "Protected Value Write Fixture \(index)"
+            )
+            let accessibility = SecureWriteAccessibilityFixture(descriptor: descriptor)
+            let controller = HostController(
+                capture: try SecureWriteCaptureFixture(window: window),
+                accessibility: accessibility,
+                permissions: GrantedPermissionFixture(),
+                syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
+                accessPresenter: LaunchAcceptingPresenterFixture()
+            )
+            let now = Date()
+            let connection = ConnectionRecord(
+                id: UUID(),
+                capabilityToken: String(repeating: "p", count: 43),
+                peer: PeerIdentity(
+                    uid: UInt32(getuid()),
+                    processID: Int32(9_910 + index),
+                    name: "protected-write-test-harness",
+                    instanceID: "protected-write-test-\(index)"
+                ),
+                capabilities: Set(HostCapability.allCases),
+                openedAt: now,
+                lastActivityAt: now,
+                idleTimeout: 900
+            )
+            func context(_ suffix: String) -> HostRequestContext {
+                HostRequestContext(
+                    requestID: "protected-\(index)-\(suffix)",
+                    connection: connection,
+                    deadline: Date().addingTimeInterval(10)
+                )
+            }
+
+            let access = try await controller.handle(
+                method: "requestAccess",
+                params: .object([
+                    "target": .object([
+                        "kind": .string("window"),
+                        "app": .object([
+                            "kind": .string("bundle_id"),
+                            "value": .string(window.identity.bundleIdentifier),
+                        ]),
+                        "launchIfNeeded": .bool(false),
+                    ]),
+                    "reason": .string("Prove protected secure writes stay denied"),
+                    "capabilities": .array([.string("observe"), .string("interact")]),
+                    "timeoutMs": .number(5_000),
+                ]),
+                context: context("access")
+            )
+            let grantID = try #require(
+                access.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+            )
+            let state = try await controller.handle(
+                method: "getState",
+                params: .object([
+                    "grantId": .string(grantID.uuidString),
+                    "screenshot": .string("none"),
+                    "maxWidthPx": .number(1_024),
+                    "includeAccessibility": .bool(true),
+                    "maxAccessibilityChars": .number(10_000),
+                    "timeoutMs": .number(5_000),
+                ]),
+                context: context("state")
+            )
+            let frameID = try #require(
+                state.objectValue?["frameId"]?.stringValue.flatMap(UUID.init(uuidString:))
+            )
+            func action(approvalID: UUID? = nil) -> JSONValue {
+                var object: [String: JSONValue] = [
+                    "kind": .string("setValue"),
+                    "grantId": .string(grantID.uuidString),
+                    "frameId": .string(frameID.uuidString),
+                    "intent": .string("Attempt an approved write against protected content"),
+                    "approvalMode": .string("elicitation"),
+                    "timeoutMs": .number(5_000),
+                    "selector": .object([
+                        "kind": .string("element"),
+                        "elementId": .string("element-1"),
+                    ]),
+                    "value": .string("CANARY-protected-write"),
+                ]
+                if let approvalID {
+                    object["approvalRequestId"] = .string(approvalID.uuidString)
+                }
+                return .object(object)
+            }
+
+            let challengeID: UUID
+            do {
+                _ = try await controller.handle(
+                    method: "action",
+                    params: action(),
+                    context: context("challenge")
+                )
+                Issue.record("protected value write executed without approval")
+                continue
+            } catch let error as WireError {
+                #expect(error.code == "approval_required")
+                #expect(error.details?.objectValue?["riskTier"] == .string("high"))
+                challengeID = try #require(
+                    error.details?.objectValue?["approvalRequestId"]?.stringValue
+                        .flatMap(UUID.init(uuidString:))
+                )
+            }
+            _ = try await controller.handle(
+                method: "approveRisk",
+                params: .object([
+                    "approvalRequestId": .string(challengeID.uuidString),
+                    "approved": .bool(true),
+                ]),
+                context: context("approve")
+            )
+            do {
+                _ = try await controller.handle(
+                    method: "action",
+                    params: action(approvalID: challengeID),
+                    context: context("retry")
+                )
+                Issue.record("approval authorized protected or descendant content")
+            } catch {
+                #expect(WireErrorMapping.map(error).code == "ACCESS_DENIED")
+            }
+            #expect(await accessibility.performedCommands().isEmpty)
+        }
+    }
+}
+
+private struct SecureWriteCaptureFixture: ScreenCaptureServing {
+    let window: WindowDescriptor
+    let display: DisplayIdentity
+    let screenshot: ScreenshotPayload
+
+    init(window: WindowDescriptor) throws {
+        self.window = window
+        display = try makeDisplay(
+            id: 99,
+            origin: Point(x: 0, y: 0),
+            logical: Size(width: 1_440, height: 900),
+            pixels: Size(width: 2_880, height: 1_800)
+        )
+        let transform = try ScreenshotTransform(
+            sourceSize: window.frame.size,
+            outputSize: window.frame.size,
+            globalOrigin: window.frame.origin
+        )
+        screenshot = ScreenshotPayload(
+            mimeType: "image/png",
+            data: "",
+            width: Int(window.frame.size.width),
+            height: Int(window.frame.size.height),
+            sha256: String(repeating: "0", count: 64),
+            transform: transform,
+            decodedByteCount: 0
+        )
+    }
+
+    func inventory() async throws -> InventorySnapshot {
+        InventorySnapshot(
+            applications: [ApplicationDescriptor(
+                bundleIdentifier: window.identity.bundleIdentifier,
+                name: window.identity.ownerName,
+                processID: window.identity.processID,
+                windows: [window],
+                isProtected: false
+            )],
+            displays: [display]
+        )
+    }
+
+    func captureWindow(
+        windowID: UInt32,
+        expectedIdentity: WindowIdentity,
+        policy: ScreenshotSizingPolicy
+    ) async throws -> ScreenshotPayload {
+        guard windowID == window.identity.windowID,
+              expectedIdentity == window.identity else {
+            throw CaptureError.windowNotFound
+        }
+        return screenshot
+    }
+
+    func captureDisplay(
+        displayID: UInt32,
+        policy: ScreenshotSizingPolicy,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) async throws -> ScreenshotPayload {
+        throw CaptureError.displayNotFound
+    }
+}
+
+private actor SecureWriteAccessibilityFixture: AccessibilityServing {
+    private var sessions: [UUID: WindowDescriptor] = [:]
+    private var revisions: [UUID: UInt64] = [:]
+    private var commands: [AccessibilityCommand] = []
+    private var secureSelectionAttempts = 0
+    private let descriptor: AccessibilityActionDescriptor
+
+    init(descriptor: AccessibilityActionDescriptor? = nil) {
+        self.descriptor = descriptor ?? AccessibilityActionDescriptor(
+            role: "AXTextField",
+            label: nil,
+            secure: true,
+            actions: [],
+            frame: Rect(
+                origin: Point(x: 160, y: 180),
+                size: Size(width: 240, height: 28)
+            ),
+            subrole: "AXSecureTextField"
+        )
+    }
+
+    func createWindowBinding(window: WindowDescriptor) throws -> AccessibilityWindowBinding {
+        AccessibilityWindowBinding.fixtureToken()
+    }
+
+    func validateWindowBinding(
+        _ binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {}
+
+    func validateWindowBinding(sessionID: UUID, window: WindowDescriptor) throws {
+        guard sessions[sessionID]?.identity == window.identity else {
+            throw AccessibilityError.windowNotFound
+        }
+    }
+
+    func openWindowSession(
+        sessionID: UUID,
+        binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {
+        sessions[sessionID] = window
+        revisions[sessionID] = 0
+    }
+
+    func refreshWindowBinding(sessionID: UUID, window: WindowDescriptor) throws -> UInt64 {
+        try validateWindowBinding(sessionID: sessionID, window: window)
+        let revision = (revisions[sessionID] ?? 0) + 1
+        revisions[sessionID] = revision
+        return revision
+    }
+
+    func state(
+        sessionID: UUID,
+        window: WindowDescriptor,
+        maximumNodes: Int,
+        maximumDepth: Int,
+        maximumCharacters: Int
+    ) throws -> AccessibilityState {
+        try validateWindowBinding(sessionID: sessionID, window: window)
+        let revision = (revisions[sessionID] ?? 0) + 1
+        revisions[sessionID] = revision
+        return AccessibilityState(
+            sessionID: sessionID,
+            revision: revision,
+            window: window,
+            nodes: [
+                AccessibilityNodeSnapshot(
+                    id: 0,
+                    parentID: nil,
+                    depth: 0,
+                    role: "AXWindow",
+                    subrole: nil,
+                    title: window.title,
+                    label: nil,
+                    value: nil,
+                    frame: window.frame,
+                    isEnabled: true,
+                    isFocused: true,
+                    isSelected: nil,
+                    secure: false,
+                    actions: ["AXRaise"]
+                ),
+                AccessibilityNodeSnapshot(
+                    id: 1,
+                    parentID: 0,
+                    depth: 1,
+                    role: descriptor.role,
+                    subrole: descriptor.subrole,
+                    title: descriptor.secure ? nil : descriptor.title,
+                    label: descriptor.secure ? nil : descriptor.label,
+                    value: nil,
+                    frame: descriptor.frame,
+                    isEnabled: true,
+                    isFocused: true,
+                    isSelected: nil,
+                    secure: descriptor.secure,
+                    actions: descriptor.secure ? [] : descriptor.actions
+                ),
+            ],
+            truncated: false
+        )
+    }
+
+    func perform(
+        sessionID: UUID,
+        revision: UInt64,
+        command: AccessibilityCommand,
+        cancellation: any InteractionCancellationChecking
+    ) throws {
+        try cancellation.check()
+        guard sessions[sessionID] != nil,
+              revisions[sessionID] == revision else {
+            throw AccessibilityError.staleRevision
+        }
+        guard case .setValue(nodeID: 1, value: _, authorization: .approvedDirectSecure) = command else {
+            throw AccessibilityError.secureElement
+        }
+        commands.append(command)
+    }
+
+    func validateFocusedWindow(sessionID: UUID, revision: UInt64) throws {
+        guard sessions[sessionID] != nil,
+              revisions[sessionID] == revision else {
+            throw AccessibilityError.staleRevision
+        }
+    }
+
+    func describeActionTarget(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int
+    ) throws -> AccessibilityActionDescriptor {
+        guard sessions[sessionID] != nil,
+              revisions[sessionID] == revision,
+              nodeID == 1 else {
+            throw AccessibilityError.elementNotFound
+        }
+        return descriptor
+    }
+
+    func describeFocusedActionTarget(
+        sessionID: UUID,
+        revision: UInt64
+    ) throws -> AccessibilityActionDescriptor {
+        try describeActionTarget(sessionID: sessionID, revision: revision, nodeID: 1)
+    }
+
+    func raise(
+        window: WindowDescriptor,
+        cancellation: any InteractionCancellationChecking
+    ) async throws {
+        throw AccessibilityError.operationFailed
+    }
+
+    func selectText(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int,
+        text: String,
+        prefix: String?,
+        suffix: String?,
+        selectionType: String,
+        cancellation: any InteractionCancellationChecking
+    ) throws {
+        try cancellation.check()
+        guard sessions[sessionID] != nil,
+              revisions[sessionID] == revision,
+              nodeID == 1 else {
+            throw AccessibilityError.elementNotFound
+        }
+        secureSelectionAttempts += 1
+        throw AccessibilityError.secureElement
+    }
+
+    func close(sessionID: UUID) {
+        sessions.removeValue(forKey: sessionID)
+        revisions.removeValue(forKey: sessionID)
+    }
+
+    func performedCommands() -> [AccessibilityCommand] { commands }
+    func secureSelectionAttemptCount() -> Int { secureSelectionAttempts }
+}
+
+private struct ApprovedSecureWriteDestinationFixture: SyntheticDestinationGuarding {
+    func validate(
+        scope: GrantScope,
+        globalPoints: [Point],
+        requireWholeTarget: Bool,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) throws {}
+
+    func validateSemanticWindow(_ identity: WindowIdentity) throws {}
+}

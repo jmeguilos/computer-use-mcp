@@ -601,7 +601,7 @@ public actor HostController: HostMethodHandling {
     private let permissions: SystemPermissionChecking
     private let controlPolicy: HostControlPolicyChecking
     private let protectedPolicy: ProtectedProcessPolicy
-    private let syntheticDestinationGuard: SyntheticDestinationGuard
+    private let syntheticDestinationGuard: any SyntheticDestinationGuarding
     private let accessPresenter: AccessApprovalPresenting
     private let applicationLauncher: ApplicationLaunching
     private let riskPresenter: RiskApprovalPresenting
@@ -629,7 +629,7 @@ public actor HostController: HostMethodHandling {
         permissions: SystemPermissionChecking = MacSystemPermissionChecker(),
         controlPolicy: HostControlPolicyChecking = AlwaysEnabledHostControlPolicy(),
         protectedPolicy: ProtectedProcessPolicy = ProtectedProcessPolicy(),
-        syntheticDestinationGuard: SyntheticDestinationGuard? = nil,
+        syntheticDestinationGuard: (any SyntheticDestinationGuarding)? = nil,
         accessPresenter: AccessApprovalPresenting = DenyingAccessApprovalPresenter(),
         applicationLauncher: ApplicationLaunching = WorkspaceApplicationLauncher(),
         riskPresenter: RiskApprovalPresenting = DenyingRiskApprovalPresenter(),
@@ -1513,6 +1513,7 @@ public actor HostController: HostMethodHandling {
             harnessName: context.connection.peer.name,
             element: elementDescriptor
         )
+        var approvalConsumed = false
         if riskTier > .low {
             if let approvalID = request.approvalRequestID {
                 guard await risks.consumeApproved(
@@ -1521,6 +1522,7 @@ public actor HostController: HostMethodHandling {
                     actionDigest: digest,
                     approvalMode: request.approvalMode
                 ) else { throw WireError(code: "approval_invalid", message: "Approval is expired, mismatched or consumed") }
+                approvalConsumed = true
             } else {
                 let authorization = await risks.authorize(
                     connectionID: context.connection.id,
@@ -1627,6 +1629,7 @@ public actor HostController: HostMethodHandling {
                     grant: grant,
                     frame: frame,
                     expectedSemanticTarget: elementDescriptor,
+                    approvalConsumed: approvalConsumed,
                     context: context,
                     cancellation: relayedCancellation
                 )
@@ -1675,6 +1678,7 @@ public actor HostController: HostMethodHandling {
         grant: AccessGrant,
         frame: FrameResource,
         expectedSemanticTarget: AccessibilityActionDescriptor?,
+        approvalConsumed: Bool,
         context: HostRequestContext,
         cancellation baseCancellation: InteractionCancellationChecking
     ) async throws {
@@ -1927,10 +1931,36 @@ public actor HostController: HostMethodHandling {
                 guard case .element(let id)? = request.selector, let value = request.value else {
                     throw invalidAction("element selector and value are required")
                 }
+                guard let expectedSemanticTarget else {
+                    throw WireError(
+                        code: "STALE_FRAME",
+                        message: "The frame-bound Accessibility target is unavailable; refresh state",
+                        retryable: true
+                    )
+                }
+                let authorization: AccessibilityValueWriteAuthorization
+                if expectedSemanticTarget.secure {
+                    // Secure descendants and protected content never inherit
+                    // the direct-field exception. This fact comes from the
+                    // exact descriptor in the approved action digest.
+                    guard AccessibilityProjection.isDirectSecureTextField(
+                        role: expectedSemanticTarget.role,
+                        subrole: expectedSemanticTarget.subrole
+                    ), approvalConsumed else {
+                        throw AccessibilityError.secureElement
+                    }
+                    authorization = .approvedDirectSecure
+                } else {
+                    authorization = .ordinary
+                }
                 try await accessibility.perform(
                     sessionID: grant.id,
                     revision: try currentRevision(grant.id),
-                    command: .setValue(nodeID: try nodeID(id), value: value),
+                    command: .setValue(
+                        nodeID: try nodeID(id),
+                        value: value,
+                        authorization: authorization
+                    ),
                     cancellation: cancellation
                 )
             case .selectText:
@@ -2052,7 +2082,8 @@ public actor HostController: HostMethodHandling {
             try syntheticDestinationGuard.validate(
                 scope: grant.scope,
                 globalPoints: [globalPoint],
-                requireWholeTarget: false
+                requireWholeTarget: false,
+                excludingProcess: context.connection.peer.captureExclusion
             )
             try cancellation.check()
             let input = self.input
@@ -2075,7 +2106,7 @@ public actor HostController: HostMethodHandling {
 
     private func validateFocusedSyntheticDestination(
         grant: AccessGrant,
-        destinationGuard: SyntheticDestinationGuard,
+        destinationGuard: any SyntheticDestinationGuarding,
         excludingProcess: CaptureExcludedProcessIdentity?,
         cancellation: InteractionCancellationChecking
     ) async throws {

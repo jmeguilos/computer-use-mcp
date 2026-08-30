@@ -43,6 +43,19 @@ public struct WindowStackEntry: Equatable, Sendable {
     }
 }
 
+/// Narrow host-facing seam. Production uses the live Quartz-backed guard;
+/// tests inject a deterministic validator so approval/dispatch behavior can be
+/// exercised without reading the real desktop window stack.
+public protocol SyntheticDestinationGuarding: Sendable {
+    func validate(
+        scope: GrantScope,
+        globalPoints: [Point],
+        requireWholeTarget: Bool,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) throws
+    func validateSemanticWindow(_ identity: WindowIdentity) throws
+}
+
 /// Re-checks the live front-to-back Quartz stack immediately before public
 /// CGEvent fallback. This prevents an omitted authorization sheet or unrelated
 /// overlay from receiving an event intended for the captured target.
@@ -289,5 +302,26 @@ public struct SyntheticDestinationGuard: Sendable {
         guard let exclusion else { return false }
         return entry.processID == exclusion.processID &&
             entry.bundleIdentifier == exclusion.bundleIdentifier
+    }
+}
+
+extension SyntheticDestinationGuard: SyntheticDestinationGuarding {
+    public func validate(
+        scope: GrantScope,
+        globalPoints: [Point],
+        requireWholeTarget: Bool,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) throws {
+        try validate(
+            scope: scope,
+            globalPoints: globalPoints,
+            requireWholeTarget: requireWholeTarget,
+            excludingProcess: excludingProcess,
+            stack: nil
+        )
+    }
+
+    public func validateSemanticWindow(_ identity: WindowIdentity) throws {
+        try validateSemanticWindow(identity, stack: nil)
     }
 }
