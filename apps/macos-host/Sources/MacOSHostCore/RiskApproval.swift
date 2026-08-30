@@ -135,6 +135,11 @@ public actor RiskApprovalStore {
         approved = approved.filter { $0.value.connectionID != connectionID }
     }
 
+    public func revokeAll() {
+        pending.removeAll()
+        approved.removeAll()
+    }
+
     public func pendingChallenges(connectionID: UUID, now: Date = Date()) -> [RiskChallenge] {
         purgeExpired(now: now)
         return pending.values.filter { $0.connectionID == connectionID }.sorted { $0.createdAt < $1.createdAt }

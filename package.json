@@ -26,6 +26,9 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "markdown:lint": "markdownlint-cli2 --config .github/markdownlint-cli2.jsonc README.md SECURITY.md CONTRIBUTING.md PRIVACY.md THIRD_PARTY_NOTICES.md 'docs/**/*.md' 'examples/**/*.md' 'sbom/**/*.md' 'tests/**/*.md' '.github/**/*.md'",
+    "examples:validate": "node -e 'for (const file of [\"examples/claude-desktop-config.json\",\"examples/claude-code.mcp.json\",\"examples/cursor-mcp.json\"]) JSON.parse(require(\"node:fs\").readFileSync(file,\"utf8\"))'",
+    "diff:check": "git diff --check && git diff --cached --check",
     "swift:build": "swift build --package-path apps/macos-host",
     "swift:test": "bash scripts/run-swift-tests.sh",
     "swift:universal": "bash scripts/build-universal.sh",
@@ -34,7 +37,8 @@
     "doctor": "npm run build --workspace @jmeguilos/computer-use-mcp && node packages/mcp/dist/index.js doctor",
     "pack:verify": "bash scripts/verify-pack.sh",
     "provenance:scan": "node scripts/provenance-scan.mjs",
+    "version:verify": "node scripts/verify-versions.mjs",
     "sbom": "bash scripts/generate-sbom.sh",
-    "verify": "npm run audit && npm run provenance:scan && npm run typecheck && npm run test && npm run build && npm run swift:test && npm run swift:build && npm run swift:universal && npm run pack:verify"
+    "verify": "npm run diff:check && npm run audit && npm run provenance:scan && npm run version:verify && npm run examples:validate && npm run markdown:lint && npm run lint && npm run typecheck && npm run test && npm run build && npm run swift:test && npm run swift:build && npm run swift:universal && npm run pack:verify"
   }
 }

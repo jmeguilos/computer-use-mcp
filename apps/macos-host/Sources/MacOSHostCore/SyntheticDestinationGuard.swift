@@ -9,6 +9,7 @@ public enum SyntheticDestinationGuardError: String, Error, Equatable, Sendable {
     case unrelatedOccluder
     case exactWindowRequired
     case pointOutsideTarget
+    case selfControlBlocked
 }
 
 public struct WindowStackEntry: Equatable, Sendable {
@@ -52,8 +53,14 @@ public struct SyntheticDestinationGuard: Sendable {
         self.protectedPolicy = protectedPolicy
     }
 
-    public func validate(scope: GrantScope, globalPoints: [Point], requireWholeTarget: Bool) throws {
-        let stack = Self.currentStack()
+    public func validate(
+        scope: GrantScope,
+        globalPoints: [Point],
+        requireWholeTarget: Bool,
+        excludingProcess: CaptureExcludedProcessIdentity? = nil,
+        stack suppliedStack: [WindowStackEntry]? = nil
+    ) throws {
+        let stack = suppliedStack ?? Self.currentStack()
         switch scope {
         case .window(let identity):
             try validateWindow(
@@ -64,10 +71,20 @@ public struct SyntheticDestinationGuard: Sendable {
             )
         case .display(let display):
             if globalPoints.isEmpty {
-                try validateFocusedWindow(on: display, stack: stack)
+                try validateFocusedWindow(
+                    on: display,
+                    stack: stack,
+                    excludingProcess: excludingProcess
+                )
                 return
             }
             for point in globalPoints {
+                if stack.contains(where: {
+                    $0.alpha > 0.01 && $0.frame.cgRect.contains(point.cgPoint) &&
+                        Self.matches($0, exclusion: excludingProcess)
+                }) {
+                    throw SyntheticDestinationGuardError.selfControlBlocked
+                }
                 if stack.contains(where: {
                     $0.alpha > 0.01 && $0.frame.cgRect.contains(point.cgPoint) && isProtected($0)
                 }) {
@@ -76,18 +93,30 @@ public struct SyntheticDestinationGuard: Sendable {
                 guard let destination = stack.first(where: {
                     $0.layer == 0 && $0.alpha > 0.01 && $0.frame.cgRect.contains(point.cgPoint)
                 }) else { continue }
+                guard !Self.matches(destination, exclusion: excludingProcess) else {
+                    throw SyntheticDestinationGuardError.selfControlBlocked
+                }
                 guard !isProtected(destination) else { throw SyntheticDestinationGuardError.protectedSurface }
             }
         }
     }
 
-    public func validateFocusedWindow(on display: DisplayIdentity, stack: [WindowStackEntry]? = nil) throws {
+    public func validateFocusedWindow(
+        on display: DisplayIdentity,
+        stack: [WindowStackEntry]? = nil,
+        excludingProcess: CaptureExcludedProcessIdentity? = nil
+    ) throws {
         guard let application = NSWorkspace.shared.frontmostApplication,
               !application.isTerminated,
               let bundleIdentifier = application.bundleIdentifier else {
             throw SyntheticDestinationGuardError.exactWindowRequired
         }
         let processID = application.processIdentifier
+        try validateFocusedApplication(
+            processID: processID,
+            bundleIdentifier: bundleIdentifier,
+            excludingProcess: excludingProcess
+        )
         guard protectedPolicy.evaluate(
             bundleIdentifier: bundleIdentifier,
             processName: application.localizedName ?? "",
@@ -113,7 +142,20 @@ public struct SyntheticDestinationGuard: Sendable {
         let resolved = stack ?? Self.currentStack()
         guard let top = resolved.first(where: {
             $0.processID == processID && Self.framesApproximatelyEqual($0.frame.cgRect, focusedFrame)
-        }), !isProtected(top) else { throw SyntheticDestinationGuardError.protectedSurface }
+        }), !Self.matches(top, exclusion: excludingProcess), !isProtected(top) else {
+            throw SyntheticDestinationGuardError.protectedSurface
+        }
+    }
+
+    public func validateFocusedApplication(
+        processID: Int32,
+        bundleIdentifier: String,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) throws {
+        guard let exclusion = excludingProcess else { return }
+        guard processID != exclusion.processID || bundleIdentifier != exclusion.bundleIdentifier else {
+            throw SyntheticDestinationGuardError.selfControlBlocked
+        }
     }
 
     public func validateWindow(
@@ -238,5 +280,14 @@ public struct SyntheticDestinationGuard: Sendable {
     private static func framesApproximatelyEqual(_ left: CGRect, _ right: CGRect) -> Bool {
         abs(left.minX - right.minX) <= 2 && abs(left.minY - right.minY) <= 2 &&
             abs(left.width - right.width) <= 2 && abs(left.height - right.height) <= 2
+    }
+
+    private static func matches(
+        _ entry: WindowStackEntry,
+        exclusion: CaptureExcludedProcessIdentity?
+    ) -> Bool {
+        guard let exclusion else { return false }
+        return entry.processID == exclusion.processID &&
+            entry.bundleIdentifier == exclusion.bundleIdentifier
     }
 }

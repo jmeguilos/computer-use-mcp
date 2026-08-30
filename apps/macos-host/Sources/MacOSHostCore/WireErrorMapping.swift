@@ -11,6 +11,7 @@ public enum WireErrorMapping {
                 return WireError(code: "WINDOW_CLOSED", message: "The granted window is unavailable or was recreated")
             case .displayNotFound: return WireError(code: "WINDOW_NOT_GRANTED", message: "The granted display is unavailable")
             case .protectedTarget: return WireError(code: "ACCESS_DENIED", message: "The target is protected")
+            case .captureTimedOut: return WireError(code: "ACTION_TIMEOUT", message: "Screen capture timed out", retryable: true)
             default: return WireError(code: "SCREEN_CAPTURE_FAILED", message: "Screen capture failed", retryable: true)
             }
         }
@@ -45,6 +46,7 @@ public enum WireErrorMapping {
         }
         if let value = error as? SyntheticDestinationGuardError {
             switch value {
+            case .selfControlBlocked: return WireError(code: "ACCESS_DENIED", message: "Controlling the requesting harness is blocked")
             case .protectedSurface: return WireError(code: "ACCESS_DENIED", message: "A protected surface would receive the input")
             case .exactWindowRequired: return WireError(code: "FOCUS_FAILED", message: "This action requires an exact window target")
             case .identityChanged: return WireError(code: "WINDOW_CLOSED", message: "The granted window process changed")
@@ -94,7 +96,7 @@ public enum WireErrorMapping {
         if error.code == "approval_required" { return error }
         let code: String
         switch error.code.uppercased() {
-        case "PERMISSION_REQUIRED", "ACCESS_DENIED", "APP_NOT_RUNNING", "WINDOW_NOT_GRANTED",
+        case "PERMISSION_REQUIRED", "APP_CONTROL_DISABLED", "ACCESS_DENIED", "APP_NOT_RUNNING", "WINDOW_NOT_GRANTED",
              "WINDOW_CLOSED", "STALE_FRAME", "ELEMENT_NOT_FOUND", "ELEMENT_NOT_ACTIONABLE",
              "FOCUS_FAILED", "SCREEN_CAPTURE_FAILED", "ACTION_TIMEOUT", "CANCELLED",
              "APPROVAL_EXPIRED", "APPROVAL_USED", "APPROVAL_MISMATCH", "BUSY", "UNSUPPORTED",

@@ -1,8 +1,12 @@
 # Setup
 
-`v0.1.0-alpha.1` is a source-only release. There is no downloadable app, Homebrew
-cask, npm-registry install, one-click extension, or notarized package. The steps
-below build and register a local development copy.
+`v0.1.0-alpha.1` is the source-only release candidate and has not been published.
+There is no downloadable app, Homebrew cask, npm-registry install, one-click
+extension, or notarized package. The steps below build and register a local
+development copy.
+
+The native first-run and settings experience is described separately in
+[Onboarding and settings](ONBOARDING.md).
 
 ## 1. Check prerequisites
 
@@ -59,9 +63,12 @@ npm run setup
 `ComputerUseMCPHost.app` wrapper with bundle identifier
 `com.jmeguilos.computer-use-mcp.host`, installs it in the per-user development
 location, applies an explicit development-only ad-hoc signature, and launches
-its permission onboarding. The installed host is started with a narrowly scoped
-development verifier that still enforces same-user kernel peer credentials and
-audit tokens. An ad-hoc signature is not a Developer ID or notarization claim.
+its original AppKit first-run window. The installed host is started with a
+narrowly scoped development verifier that still enforces same-user kernel peer
+credentials and audit tokens. The bridge independently checks the connected
+server's kernel identity and pins it to the installed sibling host path and
+signing requirement before sending hello. An ad-hoc signature is not a Developer
+ID or notarization claim.
 Setup does not modify the TCC
 database, use `sudo`, publish a package, or enable unattended startup.
 
@@ -69,7 +76,20 @@ Keep one app path and bundle identity while testing. Moving, replacing, or
 re-signing a development app can cause macOS to treat it as a different privacy
 principal and ask again.
 
-## 4. Grant macOS permissions
+The source-development verifier cannot enforce the Developer ID bridge-signing
+boundary, so another process running as the same user may also connect directly.
+A future signed release can reject unsigned direct peers, but any same-user
+program can still launch the genuine bridge; signing does not authenticate its
+parent harness. Native exact-target and action consent remains mandatory. Use
+only non-sensitive test windows with this source alpha. The installed host shows
+the source-mode warning during first-run and in settings.
+
+## 4. Complete first-run access setup
+
+The settings window begins with **General app access** off. Leave it off while
+reviewing the two macOS permission rows. Off is a native fail-closed control
+policy, not a TCC setting: operations that could inspect or change another app
+are denied, while status and Stop remain available.
 
 The host checks two permissions independently:
 
@@ -83,12 +103,33 @@ require quitting and reopening the host after Screen Recording changes. The host
 continues in a degraded state when only one permission is present and reports
 which tools remain unavailable.
 
+Return to the host and select **Check Again** after each change. Accessibility
+status includes semantic AX access and permission to post public Core Graphics
+events; it is still presented as one user-facing Accessibility row. Input
+Monitoring and event listening are neither shown nor requested.
+
+Turn **General app access** on only when both rows show the state you expect. When
+on, it permits connected clients to present a native target request, but grants
+no window, display, or action authority by itself. Turning the switch off later
+persists the off state and immediately Emergency-Stops active grants. A settings
+or preference persistence failure fails closed.
+
 Input Monitoring is not a v1 requirement. Computer Use MCP never asks you to
 disable SIP, run a `tccutil` database modification, grant Full Disk Access, or
 install a kernel/system extension.
 
 TCC permission is app-wide. Per-window access begins only when an MCP client
 calls `computer_request_access` and you approve the native target picker.
+Remembering a signed application changes only its future app decision: every new
+grant still requires an exact window choice. Display approval is separate,
+session-only, and never remembered.
+
+On the normal bridge path, caller-supplied names and instance IDs are discarded.
+The bridge attributes each connection to the nearest verifiable GUI process
+ancestor, binding its PID, bundle ID, signing identity, and process generation,
+or reports **Unidentified local MCP harness** when no such ancestor is available.
+Any same-user process can still invoke the genuine bridge, so this attribution
+does not replace exact native target or action consent.
 
 ## 5. Run the doctor
 
@@ -107,9 +148,9 @@ npm run doctor
 - stale duplicate host processes or an unreachable socket; and
 - whether the npm package passes its source-only pack check.
 
-The command must not auto-grant TCC access or loosen file permissions. Before
-sharing output, review it for usernames, filesystem paths, app names, and window
-titles.
+The command must not auto-grant TCC access, open onboarding, modify the master
+switch or onboarding revision, or loosen file permissions. Before sharing
+output, review it for usernames, filesystem paths, app names, and window titles.
 
 ## 6. Configure a client
 
@@ -146,6 +187,16 @@ It opens windows titled **Computer Use MCP Fixture — Primary** and
    verify the acting state; and
 7. press **Stop**, then confirm a new state/action call is denied.
 
+If you select **Remember this verified app identity for future requests**, end
+the grant and request access again. The host must still require the exact Primary
+window. Confirm that the app appears in **Computer Control Settings… → Remembered
+app access**, then test its per-row Remove control. A display request must offer
+session-only approval and disappear when stopped or disconnected.
+
+Stop is the v1 human-takeover boundary. The host does not monitor global keyboard
+or pointer input, so manually clicking or typing is not an atomic pause. Press
+the target rail's Stop first, or use the menu-bar Emergency Stop for all grants.
+
 Do not begin with a password manager, terminal with secrets, production admin
 console, messaging app, or a window containing customer data.
 
@@ -177,16 +228,26 @@ console, messaging app, or a window containing customer data.
 
 ### Actions fail but capture works
 
+- Confirm **Computer Control Settings… → General app access** is on. If it is off,
+  leave it off until you intentionally want clients to request control.
 - Recheck Accessibility separately.
 - Observe again after a resize, move, display-scale change, or app relaunch.
 - Prefer an Accessibility element selector over a point.
 - Bring the target to the foreground; public macOS event injection cannot
   guarantee background coordinate input.
+- Do not try to force the optional targeted private driver. It is disabled by
+  default, version-gated, and fails closed when unsupported or unavailable.
 
 ### The window has no indicator
 
 Treat the missing indicator as no valid grant. Release access, run `doctor`, and
 request it again. Do not work around this check.
+
+### Control stops when the Mac locks or sleeps
+
+This is expected. Locked use is excluded from v1, and lock, sleep, screen sleep,
+or session resignation revokes active grants. Unlock the session, review the
+settings state, and request a fresh exact target.
 
 ## Uninstall a source build
 

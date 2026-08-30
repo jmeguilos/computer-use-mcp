@@ -4,6 +4,10 @@ import Foundation
 
 @main
 final class ComputerUseMCPFixtureApplication: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private struct RuntimeSmokeFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
     private var primaryWindow: NSWindow!
     private var inspectorWindow: NSWindow!
     private var statusField: NSTextField!
@@ -12,12 +16,18 @@ final class ComputerUseMCPFixtureApplication: NSObject, NSApplicationDelegate, N
     private var duplicateWindow: NSWindow?
     private var fixturePopover: NSPopover?
     private var counter = 42
+    private let runtimeSmokeReportURL: URL?
+
+    override init() {
+        runtimeSmokeReportURL = Self.runtimeSmokeReportURL(from: CommandLine.arguments)
+        super.init()
+    }
 
     static func main() {
         let app = NSApplication.shared
         let delegate = ComputerUseMCPFixtureApplication()
         app.delegate = delegate
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(delegate.runtimeSmokeReportURL == nil ? .regular : .accessory)
         app.run()
         withExtendedLifetime(delegate) {}
     }
@@ -26,8 +36,17 @@ final class ComputerUseMCPFixtureApplication: NSObject, NSApplicationDelegate, N
         buildWindows()
         primaryWindow.orderFront(nil)
         inspectorWindow.orderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        emitManifest()
+        if let runtimeSmokeReportURL {
+            // This mode deliberately inspects and operates only objects owned by
+            // this process. It does not use AX APIs, ScreenCaptureKit, CGEvent,
+            // or any other API that needs a macOS privacy permission.
+            DispatchQueue.main.async { [weak self] in
+                self?.runRuntimeSmoke(reportURL: runtimeSmokeReportURL)
+            }
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            emitManifest()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -285,6 +304,163 @@ final class ComputerUseMCPFixtureApplication: NSObject, NSApplicationDelegate, N
         fixturePopover = popover
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
         lastActionField.stringValue = "Opened popover"
+    }
+
+    private func runRuntimeSmoke(reportURL: URL) {
+        var completedChecks: [String] = []
+        do {
+            let baselineWindows = NSApp.windows.filter { window in
+                window === primaryWindow || window === inspectorWindow
+            }
+            try require(baselineWindows.count == 2, "baseline-window-count", completed: &completedChecks)
+            try require(
+                primaryWindow.title == "Computer Use MCP Fixture — Primary" &&
+                    inspectorWindow.title == "Computer Use MCP Fixture — Inspector",
+                "baseline-window-titles",
+                completed: &completedChecks
+            )
+            try require(
+                primaryWindow.accessibilityIdentifier() == "fixture.window.primary" &&
+                    inspectorWindow.accessibilityIdentifier() == "fixture.window.inspector",
+                "baseline-window-identifiers",
+                completed: &completedChecks
+            )
+
+            let username = try fixtureView("fixture.username", as: NSTextField.self)
+            let passcode = try fixtureView("fixture.passcode", as: NSSecureTextField.self)
+            let notifications = try fixtureView("fixture.notifications", as: NSButton.self)
+            let environment = try fixtureView("fixture.environment", as: NSPopUpButton.self)
+            let confidence = try fixtureView("fixture.confidence", as: NSSlider.self)
+            try require(
+                username.stringValue == "Ada Lovelace" &&
+                    passcode.stringValue == "fixture-secret" &&
+                    notifications.state == .on &&
+                    environment.titleOfSelectedItem == "Staging" &&
+                    confidence.doubleValue == 0.75 &&
+                    statusField.stringValue == "Ready" &&
+                    counterField.stringValue == "42" &&
+                    lastActionField.stringValue == "None",
+                "deterministic-control-values",
+                completed: &completedChecks
+            )
+
+            try fixtureView("fixture.run", as: NSButton.self).performClick(nil)
+            try require(
+                statusField.stringValue == "Completed" && lastActionField.stringValue == "Run harmless action",
+                "harmless-action",
+                completed: &completedChecks
+            )
+
+            try fixtureView("fixture.duplicate.a", as: NSButton.self).performClick(nil)
+            try require(lastActionField.stringValue == "Duplicate action A", "duplicate-action-a", completed: &completedChecks)
+            try fixtureView("fixture.duplicate.b", as: NSButton.self).performClick(nil)
+            try require(lastActionField.stringValue == "Duplicate action B", "duplicate-action-b", completed: &completedChecks)
+
+            try fixtureView("fixture.increment", as: NSButton.self).performClick(nil)
+            try require(
+                counterField.stringValue == "43" && lastActionField.stringValue == "Increment counter",
+                "counter-action",
+                completed: &completedChecks
+            )
+
+            try fixtureView("fixture.openDuplicateWindow", as: NSButton.self).performClick(nil)
+            try require(
+                duplicateWindow?.title == primaryWindow.title &&
+                    duplicateWindow?.accessibilityIdentifier() == "fixture.window.duplicateTitle" &&
+                    duplicateWindow !== primaryWindow && duplicateWindow !== inspectorWindow,
+                "duplicate-title-window",
+                completed: &completedChecks
+            )
+
+            try fixtureView("fixture.openSheet", as: NSButton.self).performClick(nil)
+            try require(
+                primaryWindow.attachedSheet?.accessibilityIdentifier() == "fixture.sheet",
+                "sheet-presentation",
+                completed: &completedChecks
+            )
+            dismissFixtureSheet()
+            try require(primaryWindow.attachedSheet == nil, "sheet-dismissal", completed: &completedChecks)
+
+            let popoverButton = try fixtureView("fixture.openPopover", as: NSButton.self)
+            popoverButton.performClick(nil)
+            try require(
+                fixturePopover?.isShown == true &&
+                    descendant(withIdentifier: "fixture.popover.value", in: fixturePopover?.contentViewController?.view) != nil,
+                "popover-presentation",
+                completed: &completedChecks
+            )
+            fixturePopover?.close()
+
+            try writeRuntimeSmokeReport(
+                [
+                    "schemaVersion": 1,
+                    "status": "passed",
+                    "mode": "in-process-appkit",
+                    "baselineWindowCount": 2,
+                    "exercisedWindowCount": 3,
+                    "privacyPermissionsRequired": false,
+                    "checks": completedChecks,
+                ],
+                to: reportURL
+            )
+        } catch {
+            try? writeRuntimeSmokeReport(
+                [
+                    "schemaVersion": 1,
+                    "status": "failed",
+                    "mode": "in-process-appkit",
+                    "privacyPermissionsRequired": false,
+                    "checks": completedChecks,
+                    "error": String(describing: error),
+                ],
+                to: reportURL
+            )
+        }
+        NSApp.terminate(nil)
+    }
+
+    private func fixtureView<T: NSView>(_ identifier: String, as type: T.Type) throws -> T {
+        for root in [primaryWindow.contentView, inspectorWindow.contentView] {
+            if let view = descendant(withIdentifier: identifier, in: root) as? T {
+                return view
+            }
+        }
+        throw RuntimeSmokeFailure(description: "missing or incorrectly typed fixture view: \(identifier)")
+    }
+
+    private func descendant(withIdentifier identifier: String, in root: NSView?) -> NSView? {
+        guard let root else { return nil }
+        if root.accessibilityIdentifier() == identifier { return root }
+        for child in root.subviews {
+            if let match = descendant(withIdentifier: identifier, in: child) { return match }
+        }
+        return nil
+    }
+
+    private func require(
+        _ condition: @autoclosure () -> Bool,
+        _ name: String,
+        completed: inout [String]
+    ) throws {
+        guard condition() else { throw RuntimeSmokeFailure(description: "runtime smoke check failed: \(name)") }
+        completed.append(name)
+    }
+
+    private func writeRuntimeSmokeReport(_ report: [String: Any], to url: URL) throws {
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: report,
+            format: .xml,
+            options: 0
+        )
+        try data.write(to: url, options: [.atomic])
+    }
+
+    private static func runtimeSmokeReportURL(from arguments: [String]) -> URL? {
+        guard let flagIndex = arguments.firstIndex(of: "--runtime-smoke-report"),
+              arguments.indices.contains(flagIndex + 1) else { return nil }
+        let path = arguments[flagIndex + 1]
+        guard path.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: false)
     }
 
     private func emitManifest() {

@@ -55,7 +55,7 @@ jobs:
           node - "$report" <<'NODE'
           const { readFileSync } = require("node:fs");
           const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
-          const required = ["CI", "CodeQL", "SBOM"];
+          const required = ["CI", "CodeQL", "Dependency review", "SBOM"];
           const successful = new Set(
             report.workflow_runs
               .filter(run =>
@@ -81,6 +81,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          npm run version:verify
           package_version="$(node -p 'require("./packages/mcp/package.json").version')"
           test "$RELEASE_TAG" = "v$package_version"
           test "$package_version" = "0.1.0-alpha.1"
@@ -98,7 +99,12 @@ jobs:
 
       - name: Run mandatory source gates
         run: |
+          npm run diff:check
           npm run audit
+          npm run version:verify
+          npm run examples:validate
+          npm run markdown:lint
+          npm run lint
           npm run typecheck
           npm test
           npm run build

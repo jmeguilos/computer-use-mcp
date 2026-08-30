@@ -1,5 +1,5 @@
 {
-  "protocol": { "major": 1, "minor": 0 },
+  "protocol": { "major": 2, "minor": 0 },
   "id": "request-hello-0001",
   "method": "hello",
   "auth": {
@@ -8,8 +8,13 @@
   "client": {
     "uid": 501,
     "pid": 4242,
-    "name": "computer-use-mcp-bridge",
-    "instanceId": "instance-0000000000000001"
+    "name": "Verified Fixture Harness",
+    "instanceId": "instance-0000000000000001",
+    "harnessProcessID": 5151,
+    "harnessBundleIdentifier": "com.example.fixture-harness",
+    "harnessSigningIdentity": "fixture-designated-requirement-digest",
+    "harnessProcessStartTimeUnixMs": 1700000000000,
+    "harnessIdentityVerified": true
   },
   "capabilities": [
     "inventory.read",

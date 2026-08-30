@@ -34,12 +34,12 @@ describe("NativeSocketClient development transport", () => {
           if (request.method === "hello") {
             socket.write(
               `${JSON.stringify({
-                protocol: { major: 1, minor: 0 },
+                protocol: { major: 2, minor: 0 },
                 id,
                 ok: true,
                 result: {
-                  connectionId: "connection-123456",
-                  connectionToken: "connection-token-123456",
+                  connectionId: "11111111-1111-4111-8111-111111111111",
+                  connectionToken: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                   acceptedCapabilities: [],
                   idleExpiresAt: "2099-01-01T00:00:00.000Z"
                 }
@@ -49,7 +49,7 @@ describe("NativeSocketClient development transport", () => {
             receivedDeadline = request.deadlineUnixMs as number;
             socket.write(
               `${JSON.stringify({
-                protocol: { major: 1, minor: 0 },
+                protocol: { major: 2, minor: 0 },
                 id,
                 ok: true,
                 result: { completed: true }

@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 public struct ProtocolVersion: Codable, Equatable, Hashable, Sendable {
-    public static let current = ProtocolVersion(major: 1, minor: 0)
+    public static let current = ProtocolVersion(major: 2, minor: 0)
 
     public let major: Int
     public let minor: Int

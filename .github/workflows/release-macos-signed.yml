@@ -70,7 +70,7 @@ jobs:
           const { readFileSync } = require("node:fs");
           const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
           const commitSha = process.argv[3];
-          const required = ["CI", "CodeQL", "SBOM"];
+          const required = ["CI", "CodeQL", "Dependency review", "SBOM"];
           const successful = new Set(
             report.workflow_runs
               .filter(run =>
@@ -108,6 +108,7 @@ jobs:
         env:
           SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
+          npm run version:verify
           package_version="$(node -p 'require("./packages/mcp/package.json").version')"
           bundle_version="${package_version%%-*}"
           test "$SOURCE_TAG" = "v$package_version"
@@ -129,7 +130,12 @@ jobs:
 
       - name: Re-run mandatory gates
         run: |
+          npm run diff:check
           npm run audit
+          npm run version:verify
+          npm run examples:validate
+          npm run markdown:lint
+          npm run lint
           npm run typecheck
           npm test
           npm run build

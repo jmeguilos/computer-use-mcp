@@ -18,6 +18,8 @@ access to sensitive windows.
 | Typed or pasted value | Requested input action | Memory only for the action; audit records only the action class and policy metadata |
 | Clipboard write | Explicit `clipboard_write` capability | Written to the system pasteboard; not copied into the audit log |
 | Window identity | Target binding and revalidation | Grant lifetime; redacted audit metadata |
+| Host settings | Onboarding revision and fail-closed General app access switch | Mode-`0600` local preferences until removed |
+| Remembered app decision | Match a previously approved bundle ID, signing identity, and capability set | Mode-`0600` local consent store until individually or collectively removed |
 | Socket audit token and connection capability | Authenticate the signed native bridge and authorize local bridge calls | Memory and mode-`0600` runtime token file; never logged |
 | Audit metadata | Accountability and debugging | Mode-`0600` JSON Lines, up to 7 days or 10,000 events |
 
@@ -46,26 +48,47 @@ that directory does not revoke macOS privacy permissions.
 
 ## macOS permissions
 
-Screen Recording and Accessibility consent belong to macOS. View or revoke them
-in **System Settings → Privacy & Security**. Revoking either permission may
-require the host to be restarted before macOS reports the new state. The project
-does not alter the TCC database directly.
+Screen Recording and Accessibility are two separate macOS decisions. View or
+revoke each one in **System Settings → Privacy & Security**. The host's Screen
+visibility and App interaction rows report them independently; the latter
+combines Accessibility trust with public event-posting access. Input Monitoring
+is neither shown nor requested in v1. Revoking either permission may require the
+host to be restarted before macOS reports the new state. The project does not
+alter the TCC database directly.
 
 System Screen Recording permission can technically expose more than the selected
 window. The host narrows its own capture and action APIs to the approved target,
 but malware running as the user or a compromised host process remains a residual
 risk described in the [threat model](docs/THREAT_MODEL.md).
 
+General app access is a separate, project-owned master switch. It defaults off
+and does not change TCC. When off, operations that could expose or control
+another app fail closed while status and Stop remain available. Turning it off
+also Emergency-Stops active grants. A preference read or persistence failure
+must not result in an enabled policy.
+
 ## User controls
 
-- **Stop** on the left-edge indicator revokes all active access for that target.
+- **Stop** on the left-edge indicator revokes that exact active grant.
+- **Emergency Stop** in the menu-bar item revokes every active grant. This is the
+  v1 takeover path; the host does not monitor global keyboard or pointer input,
+  so manual input alone is not an atomic pause.
 - `computer_release_access` revokes a named grant.
 - Closing or replacing the target window invalidates its grant.
 - Client disconnect, lock, idle expiry, or host exit invalidates connection-bound
   grants.
-- Persistent app approvals can be cleared from the host menu. They remember
-  policy, not a live authority token; a new connection still
-  receives a fresh bounded grant.
+- Remembered app decisions can be removed individually or all at once in
+  **Computer Control Settings…**. They remember signed app identity and capability policy,
+  not a live authority token or a window. Every new grant still requires an
+  exact window choice. A display decision is session-only and never remembered.
+
+Locked use is excluded from v1. Lock, sleep, screen sleep, or session resignation
+revokes active authority; there is no lock-screen control or locked-use toggle.
+
+The source alpha's same-user credential and token checks do not provide the
+Developer ID bridge-signing boundary. Other processes running as the same user
+are inside its development trust boundary, so use it only with non-sensitive
+test data.
 
 ## Crash and diagnostic data
 

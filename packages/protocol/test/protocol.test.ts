@@ -12,6 +12,7 @@ import {
   CapabilitiesSchema,
   CoordinateTransformSchema,
   CurrentProtocolVersionSchema,
+  ErrorCodeSchema,
   HelloRequestSchema,
   HelloResultSchema,
   INSPECTION_TOOL_NAMES,
@@ -24,6 +25,7 @@ import {
   PUBLIC_CAPABILITIES,
   TOOL_ANNOTATIONS,
   TOOL_NAMES,
+  WindowTargetSchema,
   canonicalJson,
   constantTimeEqual,
   sha256Hex
@@ -50,6 +52,10 @@ describe("public MCP contract", () => {
     expect(TOOL_NAMES.every((name) => name.startsWith("computer_"))).toBe(true);
     expect(PUBLIC_CAPABILITIES).toEqual(["observe", "interact", "clipboard_write"]);
     expect(MAX_INLINE_PNG_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it("publishes the global app-control gate as a stable public error", () => {
+    expect(ErrorCodeSchema.parse("APP_CONTROL_DISABLED")).toBe("APP_CONTROL_DISABLED");
   });
 
   it("marks all inspection tools read-only and closed-world", () => {
@@ -100,6 +106,20 @@ describe("public MCP contract", () => {
       app: { kind: "path", value: "relative/Example.app" },
       launch_if_needed: false
     })).toThrow();
+    for (const app of [
+      { kind: "name", value: "Example" },
+      { kind: "path", value: "/Applications/Example.app" }
+    ] as const) {
+      const target = { kind: "window", app, launch_if_needed: true } as const;
+      expect(() => WindowTargetSchema.parse(target)).toThrow(/bundle_id/u);
+      expect(() => AccessTargetSchema.parse(target)).toThrow(/bundle_id/u);
+      expect(AccessTargetSchema.parse({ ...target, launch_if_needed: false }).kind).toBe("window");
+    }
+    expect(AccessTargetSchema.parse({
+      kind: "window",
+      app: { kind: "bundle_id", value: "com.example.Example" },
+      launch_if_needed: true
+    }).kind).toBe("window");
   });
 
   it("accepts bounded native opaque identifiers such as display-1 and element-0", () => {
@@ -110,21 +130,21 @@ describe("public MCP contract", () => {
 });
 
 describe("native JSONL contract", () => {
-  it("uses native protocol 1.0 and the 8 MiB line bound", () => {
+  it("uses native protocol 2.0 and the 8 MiB line bound", () => {
     expect(Object.isFrozen(PROTOCOL_VERSION)).toBe(true);
-    expect(CurrentProtocolVersionSchema.parse(PROTOCOL_VERSION)).toEqual({ major: 1, minor: 0 });
+    expect(CurrentProtocolVersionSchema.parse(PROTOCOL_VERSION)).toEqual({ major: 2, minor: 0 });
     expect(MAX_WIRE_LINE_BYTES).toBe(8 * 1024 * 1024);
   });
 
   it("admits same-major minor negotiation while rejecting another major", () => {
     expect(AuthenticatedRequestSchema.parse({
       ...authenticatedEnvelope,
-      protocol: { major: 1, minor: 2 },
+      protocol: { major: 2, minor: 2 },
       method: "status"
     }).protocol.minor).toBe(2);
     expect(() => AuthenticatedRequestSchema.parse({
       ...authenticatedEnvelope,
-      protocol: { major: 2, minor: 0 },
+      protocol: { major: 1, minor: 0 },
       method: "status"
     })).toThrow();
   });
@@ -148,17 +168,26 @@ describe("native JSONL contract", () => {
   });
 
   it("parses the authenticated hello fixture and rejects post-hello authority", async () => {
-    const value = await fixture("bridge-hello-v1.json");
+    const value = await fixture("bridge-hello-v2.json");
     expect(HelloRequestSchema.parse(value).method).toBe("hello");
     expect(BridgeRequestSchema.parse(value)).toEqual(value);
     expect(() => HelloRequestSchema.parse({
       ...(value as Record<string, unknown>),
       connectionId: authenticatedEnvelope.connectionId
     })).toThrow();
+    const client = (value as { client: Record<string, unknown> }).client;
+    expect(() => HelloRequestSchema.parse({
+      ...(value as Record<string, unknown>),
+      client: { ...client, harnessSigningIdentity: undefined }
+    })).toThrow();
+    expect(() => HelloRequestSchema.parse({
+      ...(value as Record<string, unknown>),
+      client: { ...client, harnessIdentityVerified: false }
+    })).toThrow();
   });
 
   it("parses a camelCase authenticated request fixture", async () => {
-    const value = await fixture("bridge-request-v1.json");
+    const value = await fixture("bridge-request-v2.json");
     const parsed = AuthenticatedRequestSchema.parse(value);
     expect(parsed.method).toBe("status");
     expect(parsed.connectionId).toBe(authenticatedEnvelope.connectionId);
@@ -191,7 +220,7 @@ describe("native JSONL contract", () => {
   });
 
   it("binds cancel to one exact outstanding request ID", async () => {
-    const value = await fixture("bridge-cancel-v1.json");
+    const value = await fixture("bridge-cancel-v2.json");
     expect(CancelRequestSchema.parse(value).params.requestId).toBe("request-action-0001");
     expect(() => AuthenticatedRequestSchema.parse({
       ...value as Record<string, unknown>,
@@ -208,13 +237,13 @@ describe("native JSONL contract", () => {
   });
 
   it("parses success and structured error response fixtures", async () => {
-    const success = BridgeResponseSchema.parse(await fixture("bridge-response-success-v1.json"));
+    const success = BridgeResponseSchema.parse(await fixture("bridge-response-success-v2.json"));
     expect(success.ok).toBe(true);
     if (success.ok) {
       expect(HelloResultSchema.parse(success.result).acceptedCapabilities)
         .toEqual(["inventory.read", "window.capture"]);
     }
-    const failure = BridgeResponseSchema.parse(await fixture("bridge-response-error-v1.json"));
+    const failure = BridgeResponseSchema.parse(await fixture("bridge-response-error-v2.json"));
     expect(failure.ok).toBe(false);
     if (!failure.ok) expect(failure.error.code).toBe("approval_required");
   });

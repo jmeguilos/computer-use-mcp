@@ -33,6 +33,13 @@ If GitHub renders a matrix check name differently, select the actual successful
 check from a pull request. Do not remove a gate merely because it is slow or
 requires a macOS runner.
 
+`Dependency review` runs for both pull requests and pushes to `main`. Pull
+requests compare their full base/head SHAs; mainline pushes compare the full
+before/head SHAs. The release workflows additionally query Actions history and
+require a successful `Dependency review` push workflow whose `head_sha` is the
+exact release commit, so the branch rule's pull-request check is not treated as
+tag evidence.
+
 ## Security features
 
 Enable:

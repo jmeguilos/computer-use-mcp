@@ -1,5 +1,5 @@
 {
-  "protocol": { "major": 1, "minor": 0 },
+  "protocol": { "major": 2, "minor": 0 },
   "id": "request-hello-0001",
   "ok": true,
   "result": {

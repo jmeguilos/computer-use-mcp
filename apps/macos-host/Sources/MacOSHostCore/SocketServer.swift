@@ -1,6 +1,14 @@
 import Darwin
 import Foundation
 
+/// Request-scoped values that low-level callback APIs need in order to honor
+/// the authenticated wire request's absolute deadline without broadening every
+/// service protocol. Task-local values follow the asynchronous actor hop into
+/// `HostController` and its capture service.
+enum HostRequestTaskContext {
+    @TaskLocal static var deadline: Date?
+}
+
 public actor WireConnectionSession {
     private let peer: SocketPeerCredentials
     private let authenticationToken: String
@@ -39,7 +47,9 @@ public actor WireConnectionSession {
                 // The socket loop owns Task instances and performs the cancel.
                 return .success(id: request.id, result: .object(["accepted": .bool(true)]))
             }
-            let result = try await handler.handle(method: request.method, params: request.params, context: context)
+            let result = try await HostRequestTaskContext.$deadline.withValue(context.deadline) {
+                try await handler.handle(method: request.method, params: request.params, context: context)
+            }
             if Task.isCancelled { throw WireError(code: "canceled", message: "Request was canceled", retryable: true) }
             guard Date() < context.deadline else { throw WireError(code: "deadline_exceeded", message: "Request deadline elapsed", retryable: true) }
             return .success(id: request.id, result: result)
@@ -124,10 +134,11 @@ public actor WireConnectionSession {
                 capabilityToken: token,
                 requiring: Self.requiredCapability(for: request.method)
             )
-        } catch ConnectionValidationError.expired {
+        } catch let error as ConnectionValidationError where
+            error == .expired || error == .peerIdentityChanged {
             await handler.disconnect(connectionID: id)
             self.connection = nil
-            throw ConnectionValidationError.expired
+            throw error
         }
         self.connection = refreshed
         return HostRequestContext(requestID: request.id, connection: refreshed, deadline: deadline)

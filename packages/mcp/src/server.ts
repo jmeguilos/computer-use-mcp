@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   McpServer,
   CLIENT_CAPABILITIES_META_KEY,
@@ -293,18 +294,15 @@ export class ComputerUseMcpRuntime {
           const native = asRecord(
             await this.#callNative("requestAccess", args, ctx, args.timeout_ms)
           );
-          const output: Record<string, unknown> = {
+          const parsed = RequestAccessOutputSchema.safeParse({
             ...native,
             ok: true
-          };
-          if (output["status"] === "granted") {
-            const target = asRecord(output["target"]);
-            const expectedSessionOnly = target.kind === "display";
-            if (output["session_only"] !== expectedSessionOnly) {
-              throw this.#protocolError("The native bridge returned inconsistent grant lifetime metadata.");
-            }
+          });
+          if (!parsed.success) {
+            throw this.#protocolError("The native bridge returned invalid access data.");
           }
-          return output;
+          this.#validateAccessGrant(args, parsed.data);
+          return parsed.data;
         })
     );
 
@@ -873,6 +871,65 @@ export class ComputerUseMcpRuntime {
     }
   }
 
+  #validateAccessGrant(
+    request: z.infer<typeof RequestAccessInputSchema>,
+    output: z.infer<typeof RequestAccessOutputSchema>
+  ): void {
+    if (output.ok !== true || !("status" in output) || output.status !== "granted") return;
+
+    const expectedSessionOnly = request.target.kind === "display";
+    if (output.session_only !== expectedSessionOnly) {
+      throw this.#protocolError("The native bridge returned inconsistent grant lifetime metadata.");
+    }
+
+    const requestedCapabilities = new Set(request.capabilities);
+    const returnedCapabilities = new Set(output.capabilities);
+    if (
+      returnedCapabilities.size !== output.capabilities.length ||
+      returnedCapabilities.size !== requestedCapabilities.size ||
+      [...requestedCapabilities].some(capability => !returnedCapabilities.has(capability))
+    ) {
+      throw this.#protocolError("The native bridge returned capabilities that do not exactly match the request.");
+    }
+
+    if (request.target.kind === "display") {
+      if (output.target.kind !== "display") {
+        throw this.#protocolError("The native bridge granted a different target kind.");
+      }
+      if (output.target.display.display_id !== request.target.display_id) {
+        throw this.#protocolError("The native bridge granted a different display.");
+      }
+      return;
+    }
+
+    if (output.target.kind !== "window") {
+      throw this.#protocolError("The native bridge granted a different target kind.");
+    }
+
+    const selector = request.target.app;
+    if (
+      selector.kind === "bundle_id" &&
+      output.target.app.bundle_id !== selector.value
+    ) {
+      throw this.#protocolError("The native bridge granted a window from a different application.");
+    }
+    if (
+      selector.kind === "name" &&
+      normalizeApplicationName(output.target.app.name) !== normalizeApplicationName(selector.value)
+    ) {
+      throw this.#protocolError("The native bridge granted a window from a different application.");
+    }
+    if (selector.kind === "path") {
+      const requestedPath = canonicalApplicationPath(selector.value);
+      const returnedPath = output.target.app.bundle_path === undefined
+        ? undefined
+        : canonicalApplicationPath(output.target.app.bundle_path);
+      if (requestedPath === undefined || returnedPath === undefined || returnedPath !== requestedPath) {
+        throw this.#protocolError("The native bridge granted a window from a different application path.");
+      }
+    }
+  }
+
   #validateCoordinateSpace(space: z.infer<typeof NativeStateSuccessSchema>["coordinate_space"]): void {
     const forward = space.image_to_global;
     const inverse = space.global_to_image;
@@ -955,6 +1012,18 @@ export class ComputerUseMcpRuntime {
       retryable: false,
       remediation: "Update ComputerUseMCPHost and the MCP package to compatible versions."
     });
+  }
+}
+
+function normalizeApplicationName(value: string): string {
+  return value.normalize("NFC").toLocaleLowerCase("en-US");
+}
+
+function canonicalApplicationPath(value: string): string | undefined {
+  try {
+    return realpathSync.native(value).normalize("NFC");
+  } catch {
+    return undefined;
   }
 }
 

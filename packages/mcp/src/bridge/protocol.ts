@@ -1,6 +1,9 @@
 import * as z from "zod/v4";
 
-export const NATIVE_PROTOCOL = Object.freeze({ major: 1, minor: 0 });
+// These values remain package-local so the published MCP tarball is standalone.
+// packages/mcp/test/protocol-parity.test.ts makes divergence from the shared
+// source contract a release-blocking test failure.
+export const NATIVE_PROTOCOL = Object.freeze({ major: 2, minor: 0 });
 export const NATIVE_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
 export const NativeMethodSchema = z.enum([
@@ -30,8 +33,19 @@ export const NATIVE_CAPABILITIES = Object.freeze([
   "session.stop"
 ] as const);
 
+const NativeCapabilitySchema = z.enum(NATIVE_CAPABILITIES);
+
+export const NativeApprovalRequiredDetailsSchema = z
+  .object({
+    approvalRequestId: z.string().min(16).max(512),
+    riskTier: z.string().min(1).max(128),
+    expiresAt: z.string().datetime({ offset: true }),
+    approvalMode: z.enum(["elicitation", "native"])
+  })
+  .strict();
+
 const WireProtocolSchema = z
-  .object({ major: z.literal(1), minor: z.number().int().min(0) })
+  .object({ major: z.literal(2), minor: z.number().int().min(0) })
   .strict();
 
 export const WireResponseSchema = z.discriminatedUnion("ok", [
@@ -53,15 +67,7 @@ export const WireResponseSchema = z.discriminatedUnion("ok", [
           code: z.string().min(1).max(128),
           message: z.string().min(1).max(4_000),
           retryable: z.boolean(),
-          details: z
-            .object({
-              approvalRequestId: z.string().min(16).max(512),
-              riskTier: z.string().min(1).max(128),
-              expiresAt: z.string().datetime({ offset: true }),
-              approvalMode: z.enum(["elicitation", "native"])
-            })
-            .strict()
-            .optional()
+          details: z.unknown().optional()
         })
         .strict()
     })
@@ -70,9 +76,9 @@ export const WireResponseSchema = z.discriminatedUnion("ok", [
 
 export const HelloResultSchema = z
   .object({
-    connectionId: z.string().min(8).max(256),
-    connectionToken: z.string().min(16).max(512),
-    acceptedCapabilities: z.array(z.string().min(1).max(128)),
+    connectionId: z.string().uuid(),
+    connectionToken: z.string().min(43).max(512),
+    acceptedCapabilities: z.array(NativeCapabilitySchema),
     idleExpiresAt: z.string().datetime({ offset: true })
   })
   .strict();

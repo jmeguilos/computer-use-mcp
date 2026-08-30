@@ -53,7 +53,7 @@ observation tool, and nine action tools.
 | --- | --- | --- |
 | `computer_get_status` | `{}` | versions, TCC state, readiness, active grants, pending approvals |
 | `computer_list_displays` | `include_mirrored` (default `true`) | grantable display metadata; no screenshot |
-| `computer_list_apps` | `running_only` (default `true`) | app identity, PID when running, window count, grantability |
+| `computer_list_apps` | `running_only` (v1 accepts only `true`; default `true`) | running app identity, PID, window count, grantability |
 | `computer_request_access` | discriminated `target`, `reason`, `capabilities`, `timeout_ms` | granted `grant_id` or denied/pending/permission-required status |
 | `computer_release_access` | `grant_id`, `timeout_ms` | released or not-found status |
 
@@ -251,7 +251,8 @@ failure returns:
 
 Stable alpha error codes include:
 
-`PERMISSION_REQUIRED`, `ACCESS_DENIED`, `APP_NOT_RUNNING`,
+`INVALID_REQUEST`, `PERMISSION_REQUIRED`, `APP_CONTROL_DISABLED`,
+`ACCESS_DENIED`, `APP_NOT_RUNNING`,
 `WINDOW_NOT_GRANTED`, `WINDOW_CLOSED`, `STALE_FRAME`, `ELEMENT_NOT_FOUND`,
 `ELEMENT_NOT_ACTIONABLE`, `FOCUS_FAILED`, `SCREEN_CAPTURE_FAILED`,
 `ACTION_TIMEOUT`, `CANCELLED`, `APPROVAL_EXPIRED`, `APPROVAL_USED`,
@@ -264,7 +265,7 @@ fallback action.
 
 ## Native bridge
 
-The native bridge protocol version is `1.0` and uses one JSON object per line.
+The native bridge protocol version is `2.0` and uses one JSON object per line.
 The Node adapter first spawns `ComputerUseMCPBridge` over private child pipes. A
 host-socket connection begins with a token-authenticated hello containing peer
 metadata, protocol version, and requested native capabilities. The host verifies

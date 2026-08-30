@@ -31,11 +31,36 @@ public struct GrantChoice: Sendable {
 
 public struct AccessApprovalRequest: Sendable {
     public let connectionID: UUID
+    public let requesterName: String
+    public let applicationName: String?
+    public let bundleIdentifier: String?
     public let reason: String
     public let candidates: [GrantChoice]
     public let capabilities: Set<PublicCapability>
     public let displayTarget: Bool
     public let appConsentExists: Bool
+
+    public init(
+        connectionID: UUID,
+        requesterName: String = "MCP client",
+        applicationName: String? = nil,
+        bundleIdentifier: String? = nil,
+        reason: String,
+        candidates: [GrantChoice],
+        capabilities: Set<PublicCapability>,
+        displayTarget: Bool,
+        appConsentExists: Bool
+    ) {
+        self.connectionID = connectionID
+        self.requesterName = requesterName
+        self.applicationName = applicationName
+        self.bundleIdentifier = bundleIdentifier
+        self.reason = reason
+        self.candidates = candidates
+        self.capabilities = capabilities
+        self.displayTarget = displayTarget
+        self.appConsentExists = appConsentExists
+    }
 }
 
 public struct AccessApprovalDecision: Sendable {
@@ -52,28 +77,60 @@ public struct AccessApprovalDecision: Sendable {
 
 public struct LaunchApprovalRequest: Sendable {
     public let connectionID: UUID
+    public let requesterName: String
     public let appName: String
     public let bundleIdentifier: String
     public let reason: String
     public let capabilities: Set<PublicCapability>
+
+    public init(
+        connectionID: UUID,
+        requesterName: String = "MCP client",
+        appName: String,
+        bundleIdentifier: String,
+        reason: String,
+        capabilities: Set<PublicCapability>
+    ) {
+        self.connectionID = connectionID
+        self.requesterName = requesterName
+        self.appName = appName
+        self.bundleIdentifier = bundleIdentifier
+        self.reason = reason
+        self.capabilities = capabilities
+    }
 }
 
 public protocol AccessApprovalPresenting: Sendable {
     /// Separate consent boundary for a state-changing launch. This happens
     /// before NSWorkspace is asked to start an absent application; the later
     /// exact-window picker remains mandatory.
-    func requestLaunchApproval(_ request: LaunchApprovalRequest) async -> Bool
-    func requestApproval(_ request: AccessApprovalRequest) async -> AccessApprovalDecision
+    func requestLaunchApproval(
+        _ request: LaunchApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool
+    func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision
 }
 
 public extension AccessApprovalPresenting {
-    func requestLaunchApproval(_ request: LaunchApprovalRequest) async -> Bool { false }
+    func requestLaunchApproval(
+        _ request: LaunchApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool { false }
 }
 
 public struct DenyingAccessApprovalPresenter: AccessApprovalPresenting {
     public init() {}
-    public func requestLaunchApproval(_ request: LaunchApprovalRequest) async -> Bool { false }
-    public func requestApproval(_ request: AccessApprovalRequest) async -> AccessApprovalDecision { .denied }
+    public func requestLaunchApproval(
+        _ request: LaunchApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool { false }
+    public func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision { .denied }
 }
 
 public struct ApplicationLaunchCandidate: Equatable, Sendable {
@@ -122,12 +179,20 @@ public struct WorkspaceApplicationLauncher: ApplicationLaunching {
 }
 
 public protocol RiskApprovalPresenting: Sendable {
-    func requestApproval(_ challenge: RiskChallenge, summary: String) async -> Bool
+    func requestApproval(
+        _ challenge: RiskChallenge,
+        summary: String,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool
 }
 
 public struct DenyingRiskApprovalPresenter: RiskApprovalPresenting {
     public init() {}
-    public func requestApproval(_ challenge: RiskChallenge, summary: String) async -> Bool { false }
+    public func requestApproval(
+        _ challenge: RiskChallenge,
+        summary: String,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool { false }
 }
 
 public enum RiskApprovalSummaryBuilder {
@@ -151,8 +216,14 @@ public enum RiskApprovalSummaryBuilder {
             lines.append("Selector: point (\(String(format: "%.1f", point.x)), \(String(format: "%.1f", point.y)))")
         case .element:
             if let element {
-                let label = element.label.map { ", label \(escaped($0, maximum: 512))" } ?? ""
+                let label = element.semanticLabel.map { ", label \(escaped($0, maximum: 512))" } ?? ""
                 lines.append("Selector: \(escaped(element.role, maximum: 128))\(label)\(element.secure ? ", secure" : "")")
+                if !element.semanticContext.isEmpty {
+                    let context = element.semanticContext.prefix(3)
+                        .map { escaped($0, maximum: 512) }
+                        .joined(separator: " > ")
+                    lines.append("AX context: \(context)")
+                }
             } else { lines.append("Selector: accessibility element") }
         case nil: break
         }
@@ -216,6 +287,7 @@ public struct IndicatorState: Sendable {
     public let controlling: Bool
     public let targetWindowID: UInt32?
     public let targetIdentity: WindowIdentity?
+    public let targetDisplayIdentity: DisplayIdentity?
     public let displayTopLeftFrame: Rect
     public let harnessName: String
     public let mode: String
@@ -384,7 +456,7 @@ public enum HostActionValidation {
                 throw invalid("Invalid scroll options")
             }
         case .pressKey:
-            guard let key = request.key, (1...64).contains(key.utf16.count) else {
+            guard let key = request.key, PublicKeyMap.code(for: key) != nil else {
                 throw invalid("Invalid key")
             }
             let allowed = Set(["command", "control", "option", "shift", "function"])
@@ -441,6 +513,49 @@ public enum HostActionValidation {
     }
 }
 
+public enum ElementClickFallbackPolicy {
+    /// AXPress can represent only a single primary-button activation. Other
+    /// public click shapes must use the guarded coordinate path.
+    public static func canUseAXPress(mouseButton: String, clickCount: Int) -> Bool {
+        mouseButton == "left" && clickCount == 1
+    }
+
+    /// A generic AX failure can have an uncertain outcome, so it must never be
+    /// followed by a coordinate click. A missing/unsupported action is the one
+    /// fail-closed condition that proves AX did not dispatch the activation.
+    public static func permitsFallback(after error: AccessibilityError) -> Bool {
+        error == .actionUnsupported
+    }
+
+    /// Approval and risk classification were bound to this descriptor before
+    /// execution. Reordering an action list is harmless; all semantic fields
+    /// and the frame must otherwise remain exactly the same.
+    public static func isSameBoundTarget(
+        _ current: AccessibilityActionDescriptor,
+        as approved: AccessibilityActionDescriptor
+    ) -> Bool {
+        current.hasSameControlSemantics(as: approved) && current.frame == approved.frame
+    }
+
+    public static func center(
+        of descriptor: AccessibilityActionDescriptor,
+        within frameBounds: Rect
+    ) -> Point? {
+        guard !descriptor.secure, let elementFrame = descriptor.frame,
+              elementFrame.origin.x.isFinite, elementFrame.origin.y.isFinite,
+              elementFrame.size.width.isFinite, elementFrame.size.height.isFinite,
+              elementFrame.size.width > 0, elementFrame.size.height > 0,
+              frameBounds.origin.x.isFinite, frameBounds.origin.y.isFinite,
+              frameBounds.size.width.isFinite, frameBounds.size.height.isFinite,
+              frameBounds.size.width > 0, frameBounds.size.height > 0 else { return nil }
+        let point = Point(
+            x: elementFrame.origin.x + elementFrame.size.width / 2,
+            y: elementFrame.origin.y + elementFrame.size.height / 2
+        )
+        return frameBounds.cgRect.contains(point.cgPoint) ? point : nil
+    }
+}
+
 public struct ApproveRiskParameters: Codable, Sendable {
     public let approvalRequestID: UUID
     public let approved: Bool
@@ -473,7 +588,7 @@ private struct GrantedMetadata: Sendable {
 
 public actor HostController: HostMethodHandling {
     private let capture: ScreenCaptureServing
-    private let accessibility: AccessibilityController
+    private let accessibility: any AccessibilityServing
     private let accessibilitySnapshots: AccessibilityFrameSnapshotStore
     private let input: SyntheticInputDriving
     private let textController: TextInteractionController
@@ -484,6 +599,7 @@ public actor HostController: HostMethodHandling {
     private let actionGate: ActionExecutionGate
     private let risks: RiskApprovalStore
     private let permissions: SystemPermissionChecking
+    private let controlPolicy: HostControlPolicyChecking
     private let protectedPolicy: ProtectedProcessPolicy
     private let syntheticDestinationGuard: SyntheticDestinationGuard
     private let accessPresenter: AccessApprovalPresenting
@@ -501,7 +617,7 @@ public actor HostController: HostMethodHandling {
 
     public init(
         capture: ScreenCaptureServing = ScreenCaptureService(),
-        accessibility: AccessibilityController = AccessibilityController(),
+        accessibility: any AccessibilityServing = AccessibilityController(),
         accessibilitySnapshots: AccessibilityFrameSnapshotStore = AccessibilityFrameSnapshotStore(),
         input: SyntheticInputDriving? = nil,
         focus: FocusLeaseCoordinator = FocusLeaseCoordinator(),
@@ -511,6 +627,7 @@ public actor HostController: HostMethodHandling {
         actionGate: ActionExecutionGate = ActionExecutionGate(),
         risks: RiskApprovalStore = RiskApprovalStore(),
         permissions: SystemPermissionChecking = MacSystemPermissionChecker(),
+        controlPolicy: HostControlPolicyChecking = AlwaysEnabledHostControlPolicy(),
         protectedPolicy: ProtectedProcessPolicy = ProtectedProcessPolicy(),
         syntheticDestinationGuard: SyntheticDestinationGuard? = nil,
         accessPresenter: AccessApprovalPresenting = DenyingAccessApprovalPresenter(),
@@ -535,6 +652,7 @@ public actor HostController: HostMethodHandling {
         self.actionGate = actionGate
         self.risks = risks
         self.permissions = permissions
+        self.controlPolicy = controlPolicy
         self.protectedPolicy = protectedPolicy
         self.syntheticDestinationGuard = syntheticDestinationGuard ?? SyntheticDestinationGuard(protectedPolicy: protectedPolicy)
         self.accessPresenter = accessPresenter
@@ -549,10 +667,13 @@ public actor HostController: HostMethodHandling {
 
     public func handle(method: String, params: JSONValue?, context: HostRequestContext) async throws -> JSONValue {
         try check(context)
+        if !["status", "releaseAccess", "stop"].contains(method) {
+            try await requireAppControlEnabled()
+        }
         switch method {
         case "status": return try await status(context)
         case "listDisplays": return try await listDisplays(required(params))
-        case "listApps": return try await listApps(required(params))
+        case "listApps": return try await listApps(required(params), context)
         case "requestAccess": return try await requestAccess(required(params), context)
         case "releaseAccess": return try await releaseAccess(required(params), context)
         case "getState": return try await getState(required(params), context)
@@ -587,11 +708,17 @@ public actor HostController: HostMethodHandling {
         await frames.revokeAll()
         for id in revoked { await accessibility.close(sessionID: id) }
         await accessibilitySnapshots.revokeAll()
+        await risks.revokeAll()
         grantMetadata.removeAll()
         publishedGrantIDs.removeAll()
         lastAccessibilityRevision.removeAll()
         await locks.revokeAll()
         await indicator.hideAll()
+    }
+
+    public func activeGrantCount(now: Date = Date()) async -> Int {
+        await maintenance(now: now)
+        return publishedGrantIDs.count
     }
 
     /// Trusted local UI path for the Stop button on one grant's rail.
@@ -626,24 +753,72 @@ public actor HostController: HostMethodHandling {
             publishedGrantIDs.remove(grant.id)
             lastAccessibilityRevision.removeValue(forKey: grant.id)
         }
+
+        let activeGrants = await grants.active(now: now).filter {
+            publishedGrantIDs.contains($0.id)
+        }
+        guard !activeGrants.isEmpty else { return }
+
+        // SCShareableContent is requested with `onScreenWindowsOnly: false`, so
+        // minimized, hidden, and other-Space windows remain present here. A
+        // successful inventory can therefore revoke an exact target when its
+        // immutable window identity disappears/is reused, or its approved
+        // display configuration changes. A transient inventory failure is not
+        // evidence that either target went away.
+        guard let inventory = try? await capture.inventory() else { return }
+        let currentByWindowID = Dictionary(
+            grouping: inventory.applications.flatMap(\.windows),
+            by: { $0.identity.windowID }
+        )
+        for grant in activeGrants {
+            let isCurrent: Bool
+            switch grant.scope {
+            case .window(let expected):
+                let candidates = currentByWindowID[expected.windowID] ?? []
+                if let current = candidates.first(where: { $0.identity == expected }),
+                   protectedPolicy.evaluate(current).allowed {
+                    isCurrent = (try? await accessibility.validateWindowBinding(
+                        sessionID: grant.id,
+                        window: current
+                    )) != nil
+                } else {
+                    isCurrent = false
+                }
+            case .display(let expected):
+                // A display grant is bound to the approved geometry, scale,
+                // mirroring state, and main-display state. Reconfiguration is
+                // a new target boundary even when CoreGraphics reuses the ID.
+                isCurrent = inventory.displays.contains(expected)
+            }
+            guard isCurrent else {
+                await stop(grantID: grant.id)
+                continue
+            }
+        }
     }
 
     private func status(_ context: HostRequestContext) async throws -> JSONValue {
         await maintenance(now: Date())
         let snapshot = permissions.snapshot()
+        let appControlEnabled = await controlPolicy.isAppControlEnabled()
         let active = await grants.active(connectionID: context.connection.id)
             .filter { publishedGrantIDs.contains($0.id) }
         let summaries: [JSONValue] = active.map { grant in
-            .object([
+            return .object([
                 "grantId": .string(grant.id.uuidString),
                 "targetKind": .string(grantMetadata[grant.id]?.targetKind ?? "window"),
                 "idleExpiresAt": .string(Self.iso(grant.expiresAt)),
             ])
         }
         return .object([
-            "status": .string(snapshot.isReadyForInteractiveControl ? "ready" : "permission_required"),
+            "status": .string(
+                !appControlEnabled
+                    ? "degraded"
+                    : (snapshot.isReadyForInteractiveControl ? "ready" : "permission_required")
+            ),
             "nativeVersion": .string("0.1.0-alpha.1"),
             "platform": .string("macos"),
+            "appControlEnabled": .bool(appControlEnabled),
             "permissions": .object([
                 "accessibility": .string(snapshot.accessibility.publicName),
                 "screenRecording": .string(snapshot.screenCapture.publicName),
@@ -660,19 +835,27 @@ public actor HostController: HostMethodHandling {
         return .object(["displays": .array(displays)])
     }
 
-    private func listApps(_ params: JSONValue) async throws -> JSONValue {
+    private func listApps(_ params: JSONValue, _ context: HostRequestContext) async throws -> JSONValue {
         let apps: [JSONValue] = try await capture.inventory().applications.filter { application in
             application.processID > 1 &&
                 !application.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                 !application.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }.map { application in
-            .object([
+            let isRequestingHarness = context.connection.peer.matchesHarnessApplication(
+                bundleIdentifier: application.bundleIdentifier
+            )
+            let hasGrantableWindow = application.windows.contains {
+                protectedPolicy.evaluate($0).allowed
+            }
+            return .object([
                 "bundleId": .string(application.bundleIdentifier),
                 "name": .string(application.name),
                 "isRunning": .bool(true),
                 "pid": .number(Double(application.processID)),
                 "windowCount": .number(Double(application.windows.count)),
-                "grantable": .bool(!application.isProtected && !application.windows.isEmpty),
+                "grantable": .bool(
+                    !application.isProtected && !isRequestingHarness && hasGrantableWindow
+                ),
             ])
         }
         return .object(["apps": .array(apps)])
@@ -683,7 +866,15 @@ public actor HostController: HostMethodHandling {
         guard (100...300_000).contains(request.timeoutMs) else {
             throw WireError(code: "ACTION_TIMEOUT", message: "Access timeout must be between 100ms and 300000ms")
         }
-        let requestCancellation = stopToken.scope(connectionID: context.connection.id)
+        let requestCancellation = RelayedInteractionCancellation(
+            base: DeadlineInteractionCancellation(
+                base: stopToken.scope(connectionID: context.connection.id),
+                deadline: min(
+                    context.deadline,
+                    Date().addingTimeInterval(Double(request.timeoutMs) / 1_000)
+                )
+            )
+        )
         guard !request.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.reason.utf16.count <= 500,
               !request.capabilities.isEmpty,
@@ -696,8 +887,26 @@ public actor HostController: HostMethodHandling {
                 message: "interact requires observe; clipboard_write requires observe and interact"
             )
         }
+        let requestedDisplayTarget: Bool = {
+            if case .display = request.target { return true }
+            return false
+        }()
+        let preflightCapabilities = mapCapabilities(
+            request.capabilities,
+            display: requestedDisplayTarget
+        )
+        for capability in preflightCapabilities where !permissions.snapshot().permits(capability) {
+            return .object([
+                "status": .string("permission_required"),
+                "message": .string("Required macOS permission is missing"),
+            ])
+        }
         let inventory = try await capture.inventory()
         var choices: [GrantChoice] = []
+        var windowDescriptorsByTargetKey: [String: WindowDescriptor] = [:]
+        var windowBindingsByTargetKey: [String: AccessibilityWindowBinding] = [:]
+        var presentationApplicationName: String?
+        var presentationBundleIdentifier: String?
         let isDisplay: Bool
         switch request.target {
         case .display(let displayID):
@@ -733,6 +942,14 @@ public actor HostController: HostMethodHandling {
                 guard let candidate = applicationLauncher.candidate(for: selector) else {
                     throw WireError(code: "APP_NOT_RUNNING", message: "The requested application cannot be safely resolved for launch")
                 }
+                guard !context.connection.peer.matchesHarnessApplication(
+                    bundleIdentifier: candidate.bundleIdentifier
+                ) else {
+                    return .object([
+                        "status": .string("denied"),
+                        "message": .string("Controlling the requesting harness is blocked"),
+                    ])
+                }
                 guard protectedPolicy.evaluate(
                     bundleIdentifier: candidate.bundleIdentifier,
                     processName: candidate.name,
@@ -740,13 +957,21 @@ public actor HostController: HostMethodHandling {
                 ).allowed else {
                     return .object(["status": .string("denied"), "message": .string("The application is protected")])
                 }
-                let launchApproved = await accessPresenter.requestLaunchApproval(LaunchApprovalRequest(
-                    connectionID: context.connection.id,
-                    appName: candidate.name,
-                    bundleIdentifier: candidate.bundleIdentifier,
-                    reason: request.reason,
-                    capabilities: request.capabilities
-                ))
+                let launchApproved = await withTaskCancellationHandler {
+                    await accessPresenter.requestLaunchApproval(
+                        LaunchApprovalRequest(
+                            connectionID: context.connection.id,
+                            requesterName: context.connection.peer.name,
+                            appName: candidate.name,
+                            bundleIdentifier: candidate.bundleIdentifier,
+                            reason: request.reason,
+                            capabilities: request.capabilities
+                        ),
+                        cancellation: requestCancellation
+                    )
+                } onCancel: {
+                    requestCancellation.cancel()
+                }
                 try check(context)
                 try requestCancellation.check()
                 guard launchApproved else {
@@ -765,25 +990,54 @@ public actor HostController: HostMethodHandling {
                 return .object(["status": .string("denied"), "message": .string("Application is unavailable or protected")])
             }
             let app = applications[0]
+            guard !context.connection.peer.matchesHarnessApplication(
+                bundleIdentifier: app.bundleIdentifier
+            ) else {
+                return .object([
+                    "status": .string("denied"),
+                    "message": .string("Controlling the requesting harness is blocked"),
+                ])
+            }
+            presentationApplicationName = app.name
+            presentationBundleIdentifier = app.bundleIdentifier
             let candidates = app.windows.filter { window in
                 guard let hint else { return true }
                 return window.title?.localizedCaseInsensitiveContains(hint) == true
-            }.filter { protectedPolicy.evaluate($0).allowed }
+            }.filter {
+                protectedPolicy.evaluate($0).allowed &&
+                    !context.connection.peer.matchesHarnessWindow($0.identity)
+            }
             guard !candidates.isEmpty else {
                 return .object(["status": .string("denied"), "message": .string("No matching grantable window")])
             }
-            choices = candidates.map { window in
+            for window in candidates {
                 let displayID = bestDisplay(for: window.frame, displays: inventory.displays)?.displayID ?? 0
                 let displayFrame = bestDisplay(for: window.frame, displays: inventory.displays)?.frame
                     ?? Rect(CGDisplayBounds(CGMainDisplayID()))
-                return GrantChoice(
+                let targetKey = "window:\(window.identity.windowID)"
+                // Bind the concrete AX window before human selection. A
+                // close/recreate cycle during a long-running picker cannot
+                // inherit the candidate merely because macOS reused the same
+                // numeric CGWindowID and metadata.
+                guard let binding = try? await accessibility.createWindowBinding(window: window) else {
+                    continue
+                }
+                choices.append(GrantChoice(
                     scope: .window(window.identity),
                     frame: window.frame,
                     title: window.title ?? app.name,
                     targetMetadata: windowTargetJSON(window, app: app, displayID: displayID),
-                    targetKey: "window:\(window.identity.windowID)",
+                    targetKey: targetKey,
                     displayFrame: displayFrame
-                )
+                ))
+                windowDescriptorsByTargetKey[targetKey] = window
+                windowBindingsByTargetKey[targetKey] = binding
+            }
+            guard !choices.isEmpty else {
+                return .object([
+                    "status": .string("denied"),
+                    "message": .string("No matching window has an unambiguous Accessibility identity"),
+                ])
             }
         }
 
@@ -799,22 +1053,70 @@ public actor HostController: HostMethodHandling {
         }
         // Persistent app consent never selects a concrete window. The native
         // picker is shown for every new grant, including a newly created sole window.
-        let decision = await accessPresenter.requestApproval(AccessApprovalRequest(
-            connectionID: context.connection.id,
-            reason: request.reason,
-            candidates: choices,
-            capabilities: request.capabilities,
-            displayTarget: isDisplay,
-            appConsentExists: appConsentExists
-        ))
+        let decision = await withTaskCancellationHandler {
+            await accessPresenter.requestApproval(
+                AccessApprovalRequest(
+                    connectionID: context.connection.id,
+                    requesterName: context.connection.peer.name,
+                    applicationName: presentationApplicationName,
+                    bundleIdentifier: presentationBundleIdentifier,
+                    reason: request.reason,
+                    candidates: choices,
+                    capabilities: request.capabilities,
+                    displayTarget: isDisplay,
+                    appConsentExists: appConsentExists
+                ),
+                cancellation: requestCancellation
+            )
+        } onCancel: {
+            requestCancellation.cancel()
+        }
         // Native UI is intentionally asynchronous. The caller may have timed
         // out, cancelled, or disconnected while the sheet was visible; never
         // create an orphan grant or indicator after that boundary.
         try check(context)
         try requestCancellation.check()
+        try await requireAppControlEnabled()
         guard let choice = decision.selected,
               choices.contains(where: { $0.targetKey == choice.targetKey }) else {
             return .object(["status": .string("denied"), "message": .string("User denied target access")])
+        }
+        var selectedWindowDescriptor: WindowDescriptor?
+        var selectedWindowBinding: AccessibilityWindowBinding?
+        if case .window(let expectedIdentity) = choice.scope {
+            guard let presentedWindow = windowDescriptorsByTargetKey[choice.targetKey],
+                  let binding = windowBindingsByTargetKey[choice.targetKey] else {
+                throw WireError(code: "INTERNAL_ERROR", message: "The selected window binding is unavailable")
+            }
+            let freshInventory = try await capture.inventory()
+            guard let currentWindow = freshInventory.applications
+                .flatMap(\.windows)
+                .first(where: { $0.identity == expectedIdentity }),
+                  currentWindow.frame == presentedWindow.frame,
+                  currentWindow.title == presentedWindow.title,
+                  currentWindow.layer == presentedWindow.layer,
+                  protectedPolicy.evaluate(currentWindow).allowed else {
+                return .object([
+                    "status": .string("denied"),
+                    "message": .string("The selected window changed while approval was open; request access again"),
+                ])
+            }
+            do {
+                try await accessibility.validateWindowBinding(binding, window: currentWindow)
+            } catch {
+                return .object([
+                    "status": .string("denied"),
+                    "message": .string("The selected window was recreated while approval was open; request access again"),
+                ])
+            }
+            guard !context.connection.peer.matchesHarnessWindow(currentWindow.identity) else {
+                return .object([
+                    "status": .string("denied"),
+                    "message": .string("Controlling the requesting harness is blocked"),
+                ])
+            }
+            selectedWindowDescriptor = currentWindow
+            selectedWindowBinding = binding
         }
         let persistence = isDisplay ? GrantPersistence.sessionOnly : decision.persistence
         let internalCapabilities = mapCapabilities(request.capabilities, display: isDisplay)
@@ -832,6 +1134,13 @@ public actor HostController: HostMethodHandling {
         )
         let receipt: GrantReceipt
         do {
+            if let selectedWindowDescriptor, let selectedWindowBinding {
+                try await accessibility.openWindowSession(
+                    sessionID: grantID,
+                    binding: selectedWindowBinding,
+                    window: selectedWindowDescriptor
+                )
+            }
             try await indicator.show(IndicatorState(
                 connectionID: context.connection.id,
                 grantID: grantID,
@@ -846,6 +1155,10 @@ public actor HostController: HostMethodHandling {
                     if case .window(let window) = choice.scope { return window }
                     return nil
                 }(),
+                targetDisplayIdentity: {
+                    if case .display(let display) = choice.scope { return display }
+                    return nil
+                }(),
                 displayTopLeftFrame: choice.displayFrame,
                 harnessName: context.connection.peer.name,
                 mode: request.capabilities.contains(.interact) ? "Control" : "Observe"
@@ -853,6 +1166,7 @@ public actor HostController: HostMethodHandling {
             try check(context)
             try requestCancellation.check()
             try pendingGrantCancellation.check()
+            try await requireAppControlEnabled()
             if persistence == .alwaysAllowApp, case .window(let window) = choice.scope {
                 try await consentStore?.record(window: window, capabilities: request.capabilities)
                 try check(context)
@@ -875,6 +1189,7 @@ public actor HostController: HostMethodHandling {
         } catch {
             stopToken.stop(grantID: grantID)
             _ = await grants.revoke(grantID: grantID)
+            await accessibility.close(sessionID: grantID)
             await locks.release(grantID: grantID)
             await indicator.hide(grantID: grantID)
             if error is IndicatorPresentationError {
@@ -936,6 +1251,14 @@ public actor HostController: HostMethodHandling {
             grantID: grant.id
         )
         try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
+        guard await actionGate.acquire(grantID: grant.id) else {
+            throw WireError(
+                code: "BUSY",
+                message: "Another state or action operation is already running for this grant",
+                retryable: true
+            )
+        }
+        do {
         let policy = ScreenshotSizingPolicy(maxDimension: request.maxWidthPx, maxPixels: 4_000_000)
         let screenshot: ScreenshotPayload
         var accessibilityJSON: JSONValue?
@@ -943,7 +1266,11 @@ public actor HostController: HostMethodHandling {
         var target = grantMetadata[grant.id]?.target ?? .object([:])
         switch grant.scope {
         case .display(let display):
-            screenshot = try await capture.captureDisplay(displayID: display.displayID, policy: policy)
+            screenshot = try await capture.captureDisplay(
+                displayID: display.displayID,
+                policy: policy,
+                excludingProcess: context.connection.peer.captureExclusion
+            )
             try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
             await accessibility.close(sessionID: grant.id)
             await accessibilitySnapshots.revoke(grantID: grant.id)
@@ -965,6 +1292,15 @@ public actor HostController: HostMethodHandling {
                 await stop(grantID: grant.id)
                 throw WireError(code: "window_not_found", message: "Granted window is no longer available")
             }
+            do {
+                try await accessibility.validateWindowBinding(sessionID: grant.id, window: window)
+            } catch {
+                await stop(grantID: grant.id)
+                throw WireError(
+                    code: "WINDOW_CLOSED",
+                    message: "The granted window closed or was recreated"
+                )
+            }
             let displayID = bestDisplay(for: window.frame, displays: inventory.displays)?.displayID ?? 0
             target = windowTargetJSON(window, app: app, displayID: displayID)
             if var metadata = grantMetadata[grant.id] { metadata.target = target; grantMetadata[grant.id] = metadata }
@@ -978,16 +1314,21 @@ public actor HostController: HostMethodHandling {
                 let state = try await accessibility.state(
                     sessionID: grant.id,
                     window: window,
+                    maximumNodes: 1_200,
+                    maximumDepth: 64,
                     maximumCharacters: request.maxAccessibilityChars
                 )
                 try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
                 lastAccessibilityRevision[grant.id] = state.revision
                 accessibilityState = state
             } else {
-                await accessibility.close(sessionID: grant.id)
                 await accessibilitySnapshots.revoke(grantID: grant.id)
                 try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
-                lastAccessibilityRevision.removeValue(forKey: grant.id)
+                let revision = try await accessibility.refreshWindowBinding(
+                    sessionID: grant.id,
+                    window: window
+                )
+                lastAccessibilityRevision[grant.id] = revision
                 if request.includeAccessibility {
                     accessibilityJSON = .object([
                         "mode": .string("full"),
@@ -999,7 +1340,12 @@ public actor HostController: HostMethodHandling {
             }
         }
         try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
-        let frame = await frames.create(grantID: grant.id, connectionID: context.connection.id, transform: screenshot.transform)
+        let frame = await frames.create(
+            grantID: grant.id,
+            connectionID: context.connection.id,
+            transform: screenshot.transform,
+            accessibilityRevision: accessibilityState?.revision ?? lastAccessibilityRevision[grant.id]
+        )
         do {
             try await ensureStateRequestActive(grant, cancellation: stateCancellation, context: context)
             if let accessibilityState {
@@ -1055,20 +1401,77 @@ public actor HostController: HostMethodHandling {
                 "transform": coordinate,
             ])
         }
-        return .object(result)
+        let response = JSONValue.object(result)
+        await actionGate.release(grantID: grant.id)
+        return response
+        } catch {
+            await actionGate.release(grantID: grant.id)
+            throw error
+        }
     }
 
     private func action(_ raw: JSONValue, _ context: HostRequestContext) async throws -> JSONValue {
         let request = try raw.decode(HostActionRequest.self)
         try HostActionValidation.validate(request)
-        let classifiedRisk = RiskClassifier.classify(
-            kind: request.kind,
-            intent: request.intent,
-            key: request.key,
-            modifiers: request.modifiers ?? []
-        )
+        // This fallback is used only when frame/grant validation fails before a
+        // current-frame AX target can be resolved. No action is dispatched in
+        // that path. Once resolution succeeds, the audit and approval tier are
+        // replaced with the semantic classification below.
+        var classifiedRisk = RiskClassifier.classify(request: request, element: nil)
         do {
-            return try await performAction(raw, request: request, context: context, riskTier: classifiedRisk)
+            let actionCancellation = stopToken.scope(
+                connectionID: context.connection.id,
+                grantID: request.grantID
+            )
+            let frame = try await frames.validate(
+                frameID: request.frameID,
+                grantID: request.grantID,
+                connectionID: context.connection.id,
+                intent: request.intent
+            )
+            let capability = request.usesAccessibilityAction
+                ? HostCapability.accessibilityAction : .syntheticInput
+            let grant = try await authorizeGrant(
+                grantID: request.grantID,
+                connectionID: context.connection.id,
+                capability: capability
+            )
+            if request.kind == .paste,
+               !(grantMetadata[grant.id]?.publicCapabilities.isSuperset(
+                    of: [.observe, .interact, .clipboardWrite]
+               ) == true) {
+                throw WireError(code: "ACCESS_DENIED", message: "Paste requires clipboard_write capability")
+            }
+            try await revalidate(grant: grant, frame: frame)
+
+            let elementDescriptor = await semanticActionTarget(
+                request: request,
+                grantID: grant.id
+            )
+            classifiedRisk = RiskClassifier.classify(
+                request: request,
+                element: elementDescriptor
+            )
+            // The one-shot approval is bound to both the wire action and the
+            // resolved semantic target. A relabelled/replaced control cannot
+            // consume approval issued for the earlier frame semantics.
+            let bindsFocusedElementFrame = request.selector == nil
+                && (request.text != nil || request.value != nil)
+            let digest = try actionDigest(
+                raw,
+                semanticTarget: elementDescriptor,
+                includeSemanticFrame: bindsFocusedElementFrame
+            )
+            return try await performAction(
+                request: request,
+                context: context,
+                riskTier: classifiedRisk,
+                actionDigest: digest,
+                elementDescriptor: elementDescriptor,
+                actionCancellation: actionCancellation,
+                frame: frame,
+                grant: grant
+            )
         } catch {
             let mapped = WireErrorMapping.map(error)
             let result: AuditResult
@@ -1095,52 +1498,15 @@ public actor HostController: HostMethodHandling {
     }
 
     private func performAction(
-        _ raw: JSONValue,
         request: HostActionRequest,
         context: HostRequestContext,
-        riskTier: RiskTier
+        riskTier: RiskTier,
+        actionDigest digest: String,
+        elementDescriptor: AccessibilityActionDescriptor?,
+        actionCancellation: any InteractionCancellationChecking,
+        frame: FrameResource,
+        grant: AccessGrant
     ) async throws -> JSONValue {
-        let actionCancellation = stopToken.scope(
-            connectionID: context.connection.id,
-            grantID: request.grantID
-        )
-        let frame = try await frames.validate(
-            frameID: request.frameID,
-            grantID: request.grantID,
-            connectionID: context.connection.id,
-            intent: request.intent
-        )
-        let capability = request.usesAccessibilityAction ? HostCapability.accessibilityAction : .syntheticInput
-        let grant = try await authorizeGrant(
-            grantID: request.grantID,
-            connectionID: context.connection.id,
-            capability: capability
-        )
-        if request.kind == .paste,
-           !(grantMetadata[grant.id]?.publicCapabilities.isSuperset(of: [.observe, .interact, .clipboardWrite]) == true) {
-            throw WireError(code: "ACCESS_DENIED", message: "Paste requires clipboard_write capability")
-        }
-        try await revalidate(grant: grant, frame: frame)
-        let digest = try actionDigest(raw)
-        let elementDescriptor: AccessibilityActionDescriptor?
-        if case .element(let opaque)? = request.selector,
-           let revision = lastAccessibilityRevision[grant.id],
-           let resolvedID = try? nodeID(opaque) {
-            elementDescriptor = try? await accessibility.describeActionTarget(
-                sessionID: grant.id,
-                revision: revision,
-                nodeID: resolvedID
-            )
-        } else if (request.text != nil || request.value != nil),
-                  let revision = lastAccessibilityRevision[grant.id] {
-            // Typed and pasted actions have no selector. Use only the unique,
-            // frame-bound focused AX node to decide whether a preview is safe;
-            // ambiguity fails closed to a masked length-only summary.
-            elementDescriptor = try? await accessibility.describeFocusedActionTarget(
-                sessionID: grant.id,
-                revision: revision
-            )
-        } else { elementDescriptor = nil }
         let approvalSummary = RiskApprovalSummaryBuilder.summary(
             request: request,
             target: grantMetadata[grant.id]?.target ?? .object([:]),
@@ -1170,10 +1536,24 @@ public actor HostController: HostMethodHandling {
                     throw WireError(code: "APPROVAL_MISMATCH", message: "Approval UX route changed for this exact action")
                 }
                 if request.approvalMode == .native {
-                    let approved = await riskPresenter.requestApproval(challenge, summary: approvalSummary)
+                    let approvalCancellation = RelayedInteractionCancellation(
+                        base: DeadlineInteractionCancellation(
+                            base: actionCancellation,
+                            deadline: context.deadline
+                        )
+                    )
+                    let approved = await withTaskCancellationHandler {
+                        await riskPresenter.requestApproval(
+                            challenge,
+                            summary: approvalSummary,
+                            cancellation: approvalCancellation
+                        )
+                    } onCancel: {
+                        approvalCancellation.cancel()
+                    }
                     do {
                         try check(context)
-                        try actionCancellation.check()
+                        try approvalCancellation.check()
                     } catch {
                         _ = await risks.resolve(
                             challengeID: challenge.id,
@@ -1215,16 +1595,38 @@ public actor HostController: HostMethodHandling {
             }
         }
         try actionCancellation.check()
-        guard await actionGate.acquire(grantID: grant.id) else {
-            throw WireError(code: "BUSY", message: "Another action is already running for this grant", retryable: true)
+        let mayPostGlobalInput = request.usesSyntheticInput || {
+            if request.kind == .click, case .element? = request.selector { return true }
+            return false
+        }()
+        guard await actionGate.acquire(
+            grantID: grant.id,
+            requiresGlobalSyntheticInput: mayPostGlobalInput
+        ) else {
+            throw WireError(
+                code: "BUSY",
+                message: "Another state or conflicting synthetic-input operation is already running",
+                retryable: true
+            )
         }
         let relayedCancellation = RelayedInteractionCancellation(base: actionCancellation)
         do {
+            // Approval can outlive the frame it described. Once both the
+            // per-grant and global-input leases are held, require that exact
+            // frame to still be current before any semantic re-resolution or
+            // dispatch. getState uses the same per-grant lease.
+            _ = try await frames.validate(
+                frameID: request.frameID,
+                grantID: request.grantID,
+                connectionID: context.connection.id,
+                intent: request.intent
+            )
             try await withTaskCancellationHandler {
                 try await execute(
                     request,
                     grant: grant,
                     frame: frame,
+                    expectedSemanticTarget: elementDescriptor,
                     context: context,
                     cancellation: relayedCancellation
                 )
@@ -1272,6 +1674,7 @@ public actor HostController: HostMethodHandling {
         _ request: HostActionRequest,
         grant: AccessGrant,
         frame: FrameResource,
+        expectedSemanticTarget: AccessibilityActionDescriptor?,
         context: HostRequestContext,
         cancellation baseCancellation: InteractionCancellationChecking
     ) async throws {
@@ -1285,6 +1688,14 @@ public actor HostController: HostMethodHandling {
         // approval and immediately before dispatch, not only when the request
         // first enters the action pipeline.
         try await revalidate(grant: grant, frame: frame)
+        if case .window = grant.scope,
+           frame.accessibilityRevision != lastAccessibilityRevision[grant.id] {
+            throw WireError(
+                code: "STALE_FRAME",
+                message: "The frame's Accessibility revision is no longer current",
+                retryable: true
+            )
+        }
         let requiredCapability: HostCapability = request.usesAccessibilityAction
             ? .accessibilityAction : .syntheticInput
         _ = try await authorizeGrant(
@@ -1292,6 +1703,23 @@ public actor HostController: HostMethodHandling {
             connectionID: context.connection.id,
             capability: requiredCapability
         )
+        let currentSemanticTarget = await semanticActionTarget(
+            request: request,
+            grantID: grant.id
+        )
+        let bindsFocusedElementFrame = request.selector == nil
+            && (request.text != nil || request.value != nil)
+        guard semanticTargetMatches(
+            expectedSemanticTarget,
+            currentSemanticTarget,
+            requireSameFrame: bindsFocusedElementFrame
+        ) else {
+            throw WireError(
+                code: "STALE_FRAME",
+                message: "The resolved accessibility control changed; refresh state before acting",
+                retryable: true
+            )
+        }
         try cancellation.check()
         if request.usesAccessibilityAction, case .window(let identity) = grant.scope {
             try syntheticDestinationGuard.validateSemanticWindow(identity)
@@ -1322,7 +1750,8 @@ public actor HostController: HostMethodHandling {
                     try destinationGuard.validate(
                         scope: grant.scope,
                         globalPoints: [globalPoint],
-                        requireWholeTarget: false
+                        requireWholeTarget: false,
+                        excludingProcess: context.connection.peer.captureExclusion
                     )
                     try await Task.detached {
                         try input.click(
@@ -1333,10 +1762,35 @@ public actor HostController: HostMethodHandling {
                         )
                     }.value
                 case .element(let id):
-                    try await accessibility.perform(
-                        sessionID: grant.id,
-                        revision: try currentRevision(grant.id),
-                        command: .perform(nodeID: try nodeID(id), action: nil),
+                    let resolvedID = try nodeID(id)
+                    let button = MouseButton(publicName: request.mouseButton ?? "left")
+                    let count = request.clickCount ?? 1
+                    if ElementClickFallbackPolicy.canUseAXPress(
+                        mouseButton: request.mouseButton ?? "left",
+                        clickCount: count
+                    ) {
+                        do {
+                            try await accessibility.perform(
+                                sessionID: grant.id,
+                                revision: try currentRevision(grant.id),
+                                command: .perform(nodeID: resolvedID, action: nil),
+                                cancellation: cancellation
+                            )
+                            break
+                        } catch let error as AccessibilityError where
+                            ElementClickFallbackPolicy.permitsFallback(after: error) {
+                            // Continue into the same action's frame-, grant-,
+                            // risk-, and approval-bound public fallback.
+                        }
+                    }
+                    try await clickElementCoordinateFallback(
+                        nodeID: resolvedID,
+                        button: button,
+                        clickCount: count,
+                        approvedDescriptor: expectedSemanticTarget,
+                        grant: grant,
+                        frame: frame,
+                        context: context,
                         cancellation: cancellation
                     )
                 }
@@ -1350,7 +1804,8 @@ public actor HostController: HostMethodHandling {
                 try destinationGuard.validate(
                     scope: grant.scope,
                     globalPoints: [globalFrom, globalTo],
-                    requireWholeTarget: false
+                    requireWholeTarget: false,
+                    excludingProcess: context.connection.peer.captureExclusion
                 )
                 try await Task.detached {
                     try input.drag(
@@ -1413,7 +1868,8 @@ public actor HostController: HostMethodHandling {
                 try destinationGuard.validate(
                     scope: grant.scope,
                     globalPoints: globalPoint.map { [$0] } ?? [],
-                    requireWholeTarget: globalPoint == nil
+                    requireWholeTarget: globalPoint == nil,
+                    excludingProcess: context.connection.peer.captureExclusion
                 )
                 try await Task.detached {
                     try input.scroll(
@@ -1424,9 +1880,14 @@ public actor HostController: HostMethodHandling {
                     )
                 }.value
             case .pressKey:
-                guard let key = request.key, let code = KeyMap.code(for: key) else { throw invalidAction("unsupported key") }
-                let flags = KeyMap.flags(request.modifiers ?? [])
-                try destinationGuard.validate(scope: grant.scope, globalPoints: [], requireWholeTarget: true)
+                guard let key = request.key, let code = PublicKeyMap.code(for: key) else { throw invalidAction("unsupported key") }
+                let flags = PublicKeyMap.flags(request.modifiers ?? [])
+                try await validateFocusedSyntheticDestination(
+                    grant: grant,
+                    destinationGuard: destinationGuard,
+                    excludingProcess: context.connection.peer.captureExclusion,
+                    cancellation: cancellation
+                )
                 try await Task.detached {
                     try input.key(code: code, flags: flags, cancellation: cancellation)
                 }.value
@@ -1435,7 +1896,12 @@ public actor HostController: HostMethodHandling {
                 let interval = Double(request.intervalMs ?? 0) / 1_000
                 for character in text.map(String.init) {
                     try cancellation.check()
-                    try destinationGuard.validate(scope: grant.scope, globalPoints: [], requireWholeTarget: true)
+                    try await validateFocusedSyntheticDestination(
+                        grant: grant,
+                        destinationGuard: destinationGuard,
+                        excludingProcess: context.connection.peer.captureExclusion,
+                        cancellation: cancellation
+                    )
                     try await Task.detached {
                         try input.typeText(character, cancellation: cancellation)
                     }.value
@@ -1448,7 +1914,12 @@ public actor HostController: HostMethodHandling {
                 guard request.format == nil || request.format == "text" else {
                     throw WireError(code: "UNSUPPORTED", message: "Native paste currently supports only text format")
                 }
-                try destinationGuard.validate(scope: grant.scope, globalPoints: [], requireWholeTarget: true)
+                try await validateFocusedSyntheticDestination(
+                    grant: grant,
+                    destinationGuard: destinationGuard,
+                    excludingProcess: context.connection.peer.captureExclusion,
+                    cancellation: cancellation
+                )
                 try await Task.detached {
                     try textController.paste(text, cancellation: cancellation)
                 }.value
@@ -1492,6 +1963,146 @@ public actor HostController: HostMethodHandling {
             do { try lease?.restore() } catch { throw InteractionSafetyError.focusRestoreFailed }
             throw error
         }
+    }
+
+    private func clickElementCoordinateFallback(
+        nodeID: Int,
+        button: MouseButton,
+        clickCount: Int,
+        approvedDescriptor: AccessibilityActionDescriptor?,
+        grant: AccessGrant,
+        frame: FrameResource,
+        context: HostRequestContext,
+        cancellation: InteractionCancellationChecking
+    ) async throws {
+        guard case .window(let identity) = grant.scope else {
+            throw invalidAction("element clicks require an exact window grant")
+        }
+        guard let approvedDescriptor else {
+            throw WireError(
+                code: "ELEMENT_NOT_ACTIONABLE",
+                message: "The frame-bound element could not be resolved for coordinate fallback"
+            )
+        }
+        try check(context)
+        try cancellation.check()
+        // AX actions and synthetic input are separate native capabilities.
+        // Re-check both the exact target and synthetic authority only when the
+        // fallback is actually needed.
+        try await revalidate(grant: grant, frame: frame)
+        _ = try await authorizeGrant(
+            grantID: grant.id,
+            connectionID: context.connection.id,
+            capability: .syntheticInput
+        )
+        let revision = try currentRevision(grant.id)
+        let initialDescriptor = try await accessibility.describeActionTarget(
+            sessionID: grant.id,
+            revision: revision,
+            nodeID: nodeID
+        )
+        guard ElementClickFallbackPolicy.isSameBoundTarget(initialDescriptor, as: approvedDescriptor) else {
+            throw WireError(
+                code: "STALE_FRAME",
+                message: "The selected element changed; refresh target state before retrying",
+                retryable: true
+            )
+        }
+        let frameBounds = Rect(
+            origin: frame.transform.globalOrigin,
+            size: frame.transform.sourceSize
+        )
+        guard ElementClickFallbackPolicy.center(of: initialDescriptor, within: frameBounds) != nil else {
+            throw WireError(
+                code: "ELEMENT_NOT_ACTIONABLE",
+                message: "The selected element has no safe center in the current frame"
+            )
+        }
+
+        let fallbackLease = try focus.acquire(processID: identity.processID)
+        do {
+            let inventory = try await capture.inventory()
+            guard let window = inventory.applications.flatMap(\.windows).first(where: {
+                $0.identity == identity
+            }) else {
+                throw WireError(code: "WINDOW_CLOSED", message: "The exact granted window is unavailable")
+            }
+            try await accessibility.raise(window: window, cancellation: cancellation)
+            try check(context)
+            try cancellation.check()
+            // Focus can change layout. Revalidate window geometry and the
+            // approval-bound AX element again immediately before CGEvent.
+            try await revalidate(grant: grant, frame: frame)
+            let finalDescriptor = try await accessibility.describeActionTarget(
+                sessionID: grant.id,
+                revision: revision,
+                nodeID: nodeID
+            )
+            guard ElementClickFallbackPolicy.isSameBoundTarget(finalDescriptor, as: approvedDescriptor),
+                  let globalPoint = ElementClickFallbackPolicy.center(
+                    of: finalDescriptor,
+                    within: frameBounds
+                  ) else {
+                throw WireError(
+                    code: "STALE_FRAME",
+                    message: "The selected element changed; refresh target state before retrying",
+                    retryable: true
+                )
+            }
+            try syntheticDestinationGuard.validate(
+                scope: grant.scope,
+                globalPoints: [globalPoint],
+                requireWholeTarget: false
+            )
+            try cancellation.check()
+            let input = self.input
+            try await Task.detached {
+                try input.click(
+                    globalPoint: globalPoint,
+                    button: button,
+                    clickCount: clickCount,
+                    cancellation: cancellation
+                )
+            }.value
+            try fallbackLease.restore()
+        } catch {
+            do { try fallbackLease.restore() } catch {
+                throw InteractionSafetyError.focusRestoreFailed
+            }
+            throw error
+        }
+    }
+
+    private func validateFocusedSyntheticDestination(
+        grant: AccessGrant,
+        destinationGuard: SyntheticDestinationGuard,
+        excludingProcess: CaptureExcludedProcessIdentity?,
+        cancellation: InteractionCancellationChecking
+    ) async throws {
+        try cancellation.check()
+        switch grant.scope {
+        case .window:
+            try await accessibility.validateFocusedWindow(
+                sessionID: grant.id,
+                revision: try currentRevision(grant.id)
+            )
+            try destinationGuard.validate(
+                scope: grant.scope,
+                globalPoints: [],
+                requireWholeTarget: true,
+                excludingProcess: excludingProcess
+            )
+        case .display:
+            // Display grants are session-only but still may not send keyboard
+            // input into a protected or off-display focused window.
+            try destinationGuard.validate(
+                scope: grant.scope,
+                globalPoints: [],
+                requireWholeTarget: true,
+                excludingProcess: excludingProcess
+            )
+        }
+        try cancellation.check()
     }
 
     private func check(_ context: HostRequestContext) throws {
@@ -1544,6 +2155,7 @@ public actor HostController: HostMethodHandling {
         connectionID: UUID,
         capability: HostCapability
     ) async throws -> AccessGrant {
+        try await requireAppControlEnabled()
         guard publishedGrantIDs.contains(grantID) else { throw GrantStoreError.grantNotFound }
         do {
             return try await grants.authorize(
@@ -1554,6 +2166,15 @@ public actor HostController: HostMethodHandling {
         } catch GrantStoreError.grantExpired {
             await stop(grantID: grantID)
             throw GrantStoreError.grantExpired
+        }
+    }
+
+    private func requireAppControlEnabled() async throws {
+        guard await controlPolicy.isAppControlEnabled() else {
+            throw WireError(
+                code: "APP_CONTROL_DISABLED",
+                message: "General app access is off in Computer Use MCP Host settings"
+            )
         }
     }
 
@@ -1621,13 +2242,20 @@ public actor HostController: HostMethodHandling {
     }
 
     private func windowTargetJSON(_ window: WindowDescriptor, app: ApplicationDescriptor, displayID: UInt32) -> JSONValue {
+        var appMetadata: [String: JSONValue] = [
+            "bundleId": .string(app.bundleIdentifier),
+            "name": .string(app.name),
+            "pid": .number(Double(app.processID)),
+        ]
+        if let bundlePath = app.bundleURLPath {
+            let canonicalBundlePath = URL(fileURLWithPath: bundlePath)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL.path
+            appMetadata["bundlePath"] = .string(canonicalBundlePath)
+        }
         var object: [String: JSONValue] = [
             "kind": .string("window"),
-            "app": .object([
-                "bundleId": .string(app.bundleIdentifier),
-                "name": .string(app.name),
-                "pid": .number(Double(app.processID)),
-            ]),
+            "app": .object(appMetadata),
             "boundsPoints": rectJSON(window.frame),
             "displayId": .string(Self.publicDisplayID(displayID)),
         ]
@@ -1666,10 +2294,82 @@ public actor HostController: HostMethodHandling {
         }
     }
 
-    private func actionDigest(_ raw: JSONValue) throws -> String {
+    private func semanticActionTarget(
+        request: HostActionRequest,
+        grantID: UUID
+    ) async -> AccessibilityActionDescriptor? {
+        guard let revision = lastAccessibilityRevision[grantID] else { return nil }
+        if case .element(let opaque)? = request.selector,
+           let resolvedID = try? nodeID(opaque) {
+            return try? await accessibility.describeActionTarget(
+                sessionID: grantID,
+                revision: revision,
+                nodeID: resolvedID
+            )
+        }
+        guard request.text != nil || request.value != nil else { return nil }
+        // Typed and pasted actions have no selector. Use only the unique,
+        // frame-bound focused AX node. Ambiguity returns nil and therefore
+        // keeps the conservative, metadata-free risk tier.
+        return try? await accessibility.describeFocusedActionTarget(
+            sessionID: grantID,
+            revision: revision
+        )
+    }
+
+    private func semanticTargetMatches(
+        _ expected: AccessibilityActionDescriptor?,
+        _ current: AccessibilityActionDescriptor?,
+        requireSameFrame: Bool
+    ) -> Bool {
+        switch (expected, current) {
+        case (nil, nil):
+            return true
+        case let (expected?, current?):
+            return expected.hasSameControlSemantics(as: current)
+                && (!requireSameFrame || expected.frame == current.frame)
+        default:
+            return false
+        }
+    }
+
+    private func actionDigest(
+        _ raw: JSONValue,
+        semanticTarget: AccessibilityActionDescriptor?,
+        includeSemanticFrame: Bool
+    ) throws -> String {
         var object = raw.objectValue ?? [:]
         object.removeValue(forKey: "approvalMode")
         object.removeValue(forKey: "approvalRequestId")
+        if let semanticTarget {
+            // Hash semantic strings into the digest, but never place them in
+            // the stored challenge or metadata-only audit record.
+            object["_resolvedAXTarget"] = .object([
+                "role": .string(semanticTarget.role),
+                "subrole": semanticTarget.subrole.map(JSONValue.string) ?? .null,
+                "title": semanticTarget.title.map(JSONValue.string) ?? .null,
+                "label": semanticTarget.label.map(JSONValue.string) ?? .null,
+                "identifier": semanticTarget.identifier.map(JSONValue.string) ?? .null,
+                "help": semanticTarget.help.map(JSONValue.string) ?? .null,
+                "placeholder": semanticTarget.placeholder.map(JSONValue.string) ?? .null,
+                "context": .array(semanticTarget.semanticContext.map(JSONValue.string)),
+                "secure": .bool(semanticTarget.secure),
+                "actions": .array(semanticTarget.actions.sorted().map(JSONValue.string)),
+            ])
+            if includeSemanticFrame, let frame = semanticTarget.frame {
+                object["_resolvedAXTargetFrame"] = .object([
+                    "x": .number(frame.origin.x),
+                    "y": .number(frame.origin.y),
+                    "width": .number(frame.size.width),
+                    "height": .number(frame.size.height),
+                ])
+            } else {
+                object["_resolvedAXTargetFrame"] = .null
+            }
+        } else {
+            object["_resolvedAXTarget"] = .null
+            object["_resolvedAXTargetFrame"] = .null
+        }
         let data = try JSONEncoder.wire.encode(JSONValue.object(object))
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -1686,6 +2386,12 @@ public actor HostController: HostMethodHandling {
             guard current.identity == granted else {
                 await stop(grantID: grant.id)
                 throw WireError(code: "WINDOW_CLOSED", message: "The granted window identity changed")
+            }
+            do {
+                try await accessibility.validateWindowBinding(sessionID: grant.id, window: current)
+            } catch {
+                await stop(grantID: grant.id)
+                throw WireError(code: "WINDOW_CLOSED", message: "The granted window closed or was recreated")
             }
             guard protectedPolicy.evaluate(current).allowed else {
                 await stop(grantID: grant.id)
@@ -1896,36 +2602,259 @@ private extension HostActionRequest {
 }
 
 public enum RiskClassifier {
+    /// Classifies the exact validated request using current-frame AX semantics.
+    /// Caller intent remains useful evidence, but it can never downgrade the
+    /// risk implied by the resolved control or by the action payload shape.
+    public static func classify(
+        request: HostActionRequest,
+        element: AccessibilityActionDescriptor?
+    ) -> RiskTier {
+        classify(
+            kind: request.kind,
+            intent: request.intent,
+            key: request.key,
+            modifiers: request.modifiers ?? [],
+            text: request.text,
+            value: request.value,
+            semanticAction: request.action,
+            element: element
+        )
+    }
+
+    /// Compatibility overload used by pure callers that do not yet have a
+    /// frame-bound AX descriptor. Its result intentionally stays conservative.
     public static func classify(
         kind: HostActionKind,
         intent: String,
         key: String?,
         modifiers: [String]
     ) -> RiskTier {
-        let normalized = intent.lowercased()
-        let blocked = ["bypass security", "disable security", "steal credential", "evade approval"]
-        if blocked.contains(where: normalized.contains) { return .blocked }
-        let highImpact = [
-            "delete", "remove", "submit", "send", "post", "publish", "message", "communicat",
-            "payment", "purchase", "buy", "transfer money", "upload", "install", "uninstall",
-            "permission", "privacy setting", "system setting", "credential", "password", "passcode",
-            "secret", "sensitive", "medical", "prescription", "diagnosis", "transmit",
-        ]
-        if highImpact.contains(where: normalized.contains) { return .high }
-        if kind == .pressKey,
-           key?.lowercased() == "delete" || (modifiers.contains("command") && ["q", "w"].contains(key?.lowercased() ?? "")) {
+        classify(
+            kind: kind,
+            intent: intent,
+            key: key,
+            modifiers: modifiers,
+            text: nil,
+            value: nil,
+            semanticAction: nil,
+            element: nil
+        )
+    }
+
+    private static func classify(
+        kind: HostActionKind,
+        intent: String,
+        key: String?,
+        modifiers: [String],
+        text: String?,
+        value: String?,
+        semanticAction: String?,
+        element: AccessibilityActionDescriptor?
+    ) -> RiskTier {
+        let controlEvidence = (element?.semanticMetadata ?? [])
+            + (element?.actions ?? [])
+            + [semanticAction].compactMap { $0 }
+        let nonPayloadEvidence = normalizedEvidence([intent] + controlEvidence)
+
+        if containsAnyPhrase(blockedPhrases, in: nonPayloadEvidence) {
+            return .blocked
+        }
+
+        // A secure role is high risk even if a buggy or adversarial caller
+        // supplies a benign intent and even if the AX description is redacted.
+        if element?.secure == true || isSecureRole(element?.role) || isSecureRole(element?.subrole) {
             return .high
         }
+
+        if containsAnyPhrase(highImpactPhrases, in: nonPayloadEvidence)
+            || containsAnyFragment(highImpactFragments, in: nonPayloadEvidence.tokens) {
+            return .high
+        }
+
+        if kind == .pressKey, isConsequentialKey(key, modifiers: modifiers) {
+            return .high
+        }
+        if kind == .typeText, text?.contains(where: { $0 == "\n" || $0 == "\r" }) == true {
+            // Unlike paste/set-value, synthetic typing of a line break can
+            // activate a focused default control and submit the current form.
+            return .high
+        }
+        if [.typeText, .paste, .setValue].contains(kind),
+           payloadLooksSensitive(text ?? value ?? "") {
+            return .high
+        }
+
+        if isClearlyBenignSemanticAction(
+            kind: kind,
+            requestedAction: semanticAction,
+            element: element
+        ) {
+            return .low
+        }
+
         switch kind {
-        case .scroll: return .low
-        case .click:
-            // Caller-supplied intent is audit context, never a trusted semantic
-            // hit-test. Coordinate and AX presses therefore require at least a
-            // medium challenge unless a future native classifier proves safety.
-            return .medium
-        case .drag, .pressKey, .typeText, .paste, .setValue, .selectText, .performSecondaryAction:
+        case .scroll:
+            return .low
+        case .click, .drag, .pressKey, .typeText, .paste, .setValue,
+             .selectText, .performSecondaryAction:
+            // Coordinates, unresolved AX targets, text mutation and unknown AX
+            // actions all retain the existing medium confirmation floor.
             return .medium
         }
+    }
+
+    private struct NormalizedEvidence {
+        let text: String
+        let tokens: [String]
+    }
+
+    private static let blockedPhrases = [
+        "bypass security", "disable security", "turn off security", "turn off firewall",
+        "evade approval", "skip approval", "steal credential", "exfiltrate credential",
+        "approve administrator", "approve admin prompt",
+    ]
+
+    private static let highImpactPhrases = [
+        // Destructive or irreversible actions.
+        "delete", "delete account", "erase", "remove", "trash", "clear all",
+        "discard changes", "permanently delete", "empty trash",
+        // Communication, submission and publication.
+        "submit", "send", "send message", "post", "publish", "reply", "comment",
+        "share", "invite", "message", "email", "transmit", "export data",
+        // Payments and other financial commitments.
+        "payment", "pay now", "purchase", "buy", "checkout", "place order",
+        "transfer money", "wire transfer", "donate", "subscribe", "billing",
+        "credit card", "debit card", "card number", "bank account", "routing number", "cvv",
+        // Uploads, software changes, permission changes and OS settings.
+        "upload", "attach file", "install", "uninstall", "update now",
+        "grant permission", "allow access", "authorize access", "privacy setting",
+        "security setting", "system setting", "system preferences", "screen recording",
+        "accessibility permission", "administrator password",
+        // Credentials, identity and sensitive-data handling.
+        "credential", "password", "passcode", "one time code", "verification code",
+        "recovery code", "security code", "authentication code", "api key", "private key",
+        "secret", "username", "user name", "otp", "mfa", "two factor", "2fa", "pin",
+        "sign in", "log in", "verify identity", "social security", "passport",
+        "confidential", "sensitive", "sensitive data",
+        // Medical actions and protected health information.
+        "medical", "prescription", "diagnosis", "treatment", "medication", "dosage",
+        "patient", "health record", "clinical",
+    ]
+
+    /// AX identifiers and action names are commonly glued together (for
+    /// example `AXDelete` or `submitButton`). Restrict fragment matching to
+    /// unambiguous consequential stems; ambiguous words such as `post` and
+    /// `pin` remain phrase/token matches to avoid `postal`/`spinning` errors.
+    private static let highImpactFragments = [
+        "delete", "erase", "remove", "submit", "send", "publish", "message",
+        "communicat", "payment", "purchase", "checkout", "upload", "install",
+        "uninstall", "permission", "authorize", "credential", "password",
+        "passcode", "secret", "sensitive", "medical", "prescrib", "diagnosis", "transmit",
+    ]
+
+    private static func normalizedEvidence(_ values: [String]) -> NormalizedEvidence {
+        let folded = values.joined(separator: " ")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+        let tokens = folded.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        return NormalizedEvidence(text: " " + tokens.joined(separator: " ") + " ", tokens: tokens)
+    }
+
+    private static func containsAnyPhrase(
+        _ phrases: [String],
+        in evidence: NormalizedEvidence
+    ) -> Bool {
+        phrases.contains { phrase in
+            let normalized = normalizedEvidence([phrase]).text
+            return evidence.text.contains(normalized)
+        }
+    }
+
+    private static func containsAnyFragment(_ fragments: [String], in tokens: [String]) -> Bool {
+        tokens.contains { token in fragments.contains(where: token.contains) }
+    }
+
+    private static func isSecureRole(_ role: String?) -> Bool {
+        guard let role else { return false }
+        let normalized = role.lowercased()
+        return normalized.contains("securetextfield") || normalized.contains("protectedcontent")
+    }
+
+    private static func isConsequentialKey(_ key: String?, modifiers: [String]) -> Bool {
+        let normalizedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if ["delete", "backspace", "return", "enter"].contains(normalizedKey) { return true }
+        let normalizedModifiers = Set(modifiers.map { $0.lowercased() })
+        return normalizedModifiers.contains("command") && ["q", "w", "return", "enter"].contains(normalizedKey)
+    }
+
+    private static func isClearlyBenignSemanticAction(
+        kind: HostActionKind,
+        requestedAction: String?,
+        element: AccessibilityActionDescriptor?
+    ) -> Bool {
+        guard let element, !element.secure else { return false }
+        let role = element.role.lowercased()
+        switch kind {
+        case .selectText:
+            return role.contains("text") || role == "axwebarea"
+        case .click:
+            return ["axdisclosuretriangle", "axscrollbar"].contains(role)
+        case .performSecondaryAction:
+            guard let requestedAction else { return false }
+            let allowed = Set(["axshowmenu", "axraise"])
+            let normalizedAction = requestedAction.lowercased()
+            return allowed.contains(normalizedAction)
+                && element.actions.contains { $0.lowercased() == normalizedAction }
+        default:
+            return false
+        }
+    }
+
+    private static func payloadLooksSensitive(_ payload: String) -> Bool {
+        guard !payload.isEmpty else { return false }
+        let normalized = payload.lowercased()
+        let markers = [
+            "-----begin private key-----", "authorization: bearer ", "password=", "passwd=",
+            "api_key", "api-key", "apikey", "client_secret", "recovery code", "secret=",
+        ]
+        if markers.contains(where: normalized.contains) { return true }
+        if normalized.range(
+            of: #"(^|[^0-9])[0-9]{3}-[0-9]{2}-[0-9]{4}([^0-9]|$)"#,
+            options: .regularExpression
+        ) != nil { return true }
+        if normalized.range(
+            of: #"(^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}([^A-Za-z0-9_-]|$)"#,
+            options: .regularExpression
+        ) != nil { return true }
+        return containsLuhnValidCardNumber(normalized)
+    }
+
+    private static func containsLuhnValidCardNumber(_ value: String) -> Bool {
+        var candidate: [Int] = []
+        func isLuhnValid(_ digits: [Int]) -> Bool {
+            guard (13...19).contains(digits.count), Set(digits).count > 1 else { return false }
+            let checksum = digits.reversed().enumerated().reduce(0) { total, item in
+                let (offset, digit) = item
+                guard offset % 2 == 1 else { return total + digit }
+                let doubled = digit * 2
+                return total + (doubled > 9 ? doubled - 9 : doubled)
+            }
+            return checksum % 10 == 0
+        }
+        for scalar in value.unicodeScalars {
+            if CharacterSet.decimalDigits.contains(scalar),
+               let digit = Int(String(scalar)) {
+                candidate.append(digit)
+                if candidate.count > 19 { candidate.removeAll(keepingCapacity: true) }
+            } else if (scalar == " " || scalar == "-") && !candidate.isEmpty {
+                continue
+            } else {
+                if isLuhnValid(candidate) { return true }
+                candidate.removeAll(keepingCapacity: true)
+            }
+        }
+        return isLuhnValid(candidate)
     }
 }
 
@@ -1939,14 +2868,34 @@ private extension MouseButton {
     }
 }
 
-private enum KeyMap {
-    static func code(for key: String) -> UInt16? {
-        let named: [String: UInt16] = [
-            "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51,
-            "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126,
-            "home": 115, "end": 119, "pageup": 116, "pagedown": 121,
-        ]
-        if let value = named[key.lowercased()] { return value }
+public enum PublicKeyMap {
+    /// The complete named-key vocabulary advertised by the MCP schema. Values
+    /// are macOS virtual key codes, not Unicode characters.
+    public static let namedKeyCodes: [String: UInt16] = [
+        "return": 36, "enter": 36,
+        "tab": 48, "space": 49,
+        "backspace": 51, "delete": 51,
+        "escape": 53, "esc": 53,
+        "clear": 71,
+        "help": 114, "insert": 114,
+        "home": 115,
+        "page_up": 116, "pageup": 116,
+        "forward_delete": 117, "forwarddelete": 117,
+        "end": 119,
+        "page_down": 121, "pagedown": 121,
+        "left": 123, "arrow_left": 123,
+        "right": 124, "arrow_right": 124,
+        "down": 125, "arrow_down": 125,
+        "up": 126, "arrow_up": 126,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118,
+        "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+        "f13": 105, "f14": 107, "f15": 113, "f16": 106,
+        "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+    ]
+
+    public static func code(for key: String) -> UInt16? {
+        if let value = namedKeyCodes[key] { return value }
         let ansi: [Character: UInt16] = [
             "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
             "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
@@ -1956,11 +2905,13 @@ private enum KeyMap {
             "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44,
             "n": 45, "m": 46, ".": 47, "`": 50,
         ]
-        guard key.count == 1, let character = key.lowercased().first else { return nil }
+        // The API models a physical key plus explicit modifiers. Accepting an
+        // uppercase letter without adding Shift would silently emit lowercase.
+        guard key.count == 1, key == key.lowercased(), let character = key.first else { return nil }
         return ansi[character]
     }
 
-    static func flags(_ modifiers: [String]) -> UInt64 {
+    public static func flags(_ modifiers: [String]) -> UInt64 {
         modifiers.reduce(0) { result, modifier in
             switch modifier {
             case "command": return result | KeyboardModifier.command
