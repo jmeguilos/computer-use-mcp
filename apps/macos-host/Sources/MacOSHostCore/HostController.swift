@@ -2850,6 +2850,7 @@ public enum RiskClassifier {
             + (element?.actions ?? [])
             + [semanticAction].compactMap { $0 }
         let nonPayloadEvidence = normalizedEvidence([intent] + controlEvidence)
+        let controlOnlyEvidence = normalizedEvidence(controlEvidence)
 
         if containsAnyPhrase(blockedPhrases, in: nonPayloadEvidence) {
             return .blocked
@@ -2893,7 +2894,7 @@ public enum RiskClassifier {
             elementEnabled: elementEnabled,
             affirmativelyBenign: containsAnyPhrase(
                 benignInteractionPhrases,
-                in: nonPayloadEvidence
+                in: controlOnlyEvidence
             )
         ) {
             return .low
