@@ -249,6 +249,17 @@ struct PersistentAppConsentTests {
         }
         let persisted = await (try PersistentAppConsentStore(url: url)).all()
         let inMemory = await store.all()
-        #expect(persisted == inMemory)
+        #expect(persisted.count == 1)
+        #expect(inMemory.count == 1)
+        guard let persistedRecord = persisted.first, let inMemoryRecord = inMemory.first else {
+            Issue.record("consent disappeared after a failed revoke")
+            return
+        }
+        #expect(persistedRecord.bundleIdentifier == inMemoryRecord.bundleIdentifier)
+        #expect(persistedRecord.signingIdentity == inMemoryRecord.signingIdentity)
+        #expect(persistedRecord.capabilities == inMemoryRecord.capabilities)
+        // ISO-8601 persistence is second-granular while the live record keeps
+        // Date's subsecond precision.
+        #expect(abs(persistedRecord.updatedAt.timeIntervalSince(inMemoryRecord.updatedAt)) < 1)
     }
 }
