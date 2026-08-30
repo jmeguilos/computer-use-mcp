@@ -1,22 +1,95 @@
+import AppKit
 import Foundation
+
+public protocol HarnessIdentityValidating: Sendable {
+    func isCurrent(_ peer: PeerIdentity) -> Bool
+}
+
+public struct LiveHarnessIdentityValidator: HarnessIdentityValidating {
+    public init() {}
+
+    public func isCurrent(_ peer: PeerIdentity) -> Bool {
+        guard peer.harnessIdentityVerified else { return true }
+        guard let processID = peer.harnessProcessID,
+              let bundleIdentifier = peer.harnessBundleIdentifier,
+              let signingIdentity = peer.harnessSigningIdentity,
+              let processStartTimeUnixMs = peer.harnessProcessStartTimeUnixMs,
+              let running = NSRunningApplication(processIdentifier: processID),
+              !running.isTerminated,
+              running.bundleIdentifier == bundleIdentifier,
+              running.launchDate.map({ Int64($0.timeIntervalSince1970 * 1_000) }) == processStartTimeUnixMs,
+              ProcessCodeIdentity.designatedRequirementDigest(processID: processID) == signingIdentity else {
+            return false
+        }
+        return true
+    }
+}
 
 public struct PeerIdentity: Codable, Equatable, Sendable {
     public let uid: UInt32
     public let processID: Int32
     public let name: String
     public let instanceID: String
+    public let harnessProcessID: Int32?
+    public let harnessBundleIdentifier: String?
+    public let harnessSigningIdentity: String?
+    public let harnessProcessStartTimeUnixMs: Int64?
+    public let harnessIdentityVerified: Bool
     private enum CodingKeys: String, CodingKey {
         case uid
         case processID = "pid"
         case name
         case instanceID = "instanceId"
+        case harnessProcessID, harnessBundleIdentifier, harnessSigningIdentity
+        case harnessProcessStartTimeUnixMs, harnessIdentityVerified
     }
 
-    public init(uid: UInt32, processID: Int32, name: String, instanceID: String) {
+    public init(
+        uid: UInt32,
+        processID: Int32,
+        name: String,
+        instanceID: String,
+        harnessProcessID: Int32? = nil,
+        harnessBundleIdentifier: String? = nil,
+        harnessSigningIdentity: String? = nil,
+        harnessProcessStartTimeUnixMs: Int64? = nil,
+        harnessIdentityVerified: Bool = false
+    ) {
         self.uid = uid
         self.processID = processID
         self.name = name
         self.instanceID = instanceID
+        self.harnessProcessID = harnessProcessID
+        self.harnessBundleIdentifier = harnessBundleIdentifier
+        self.harnessSigningIdentity = harnessSigningIdentity
+        self.harnessProcessStartTimeUnixMs = harnessProcessStartTimeUnixMs
+        self.harnessIdentityVerified = harnessIdentityVerified
+    }
+
+    public func matchesHarnessWindow(_ identity: WindowIdentity) -> Bool {
+        harnessIdentityVerified &&
+            harnessProcessID == identity.processID &&
+            harnessBundleIdentifier == identity.bundleIdentifier &&
+            harnessSigningIdentity == identity.signingIdentity &&
+            harnessProcessStartTimeUnixMs == identity.processStartTimeUnixMs
+    }
+
+    public func matchesHarnessApplication(bundleIdentifier: String) -> Bool {
+        harnessIdentityVerified && harnessBundleIdentifier == bundleIdentifier
+    }
+
+    public var captureExclusion: CaptureExcludedProcessIdentity? {
+        guard harnessIdentityVerified,
+              let processID = harnessProcessID,
+              let bundleIdentifier = harnessBundleIdentifier,
+              let signingIdentity = harnessSigningIdentity,
+              let processStartTimeUnixMs = harnessProcessStartTimeUnixMs else { return nil }
+        return CaptureExcludedProcessIdentity(
+            processID: processID,
+            bundleIdentifier: bundleIdentifier,
+            signingIdentity: signingIdentity,
+            processStartTimeUnixMs: processStartTimeUnixMs
+        )
     }
 }
 
@@ -48,6 +121,7 @@ public enum ConnectionValidationError: String, Error, Equatable, Sendable {
     case expired
     case capabilityDenied
     case connectionTokenMismatch
+    case peerIdentityChanged
 }
 
 public struct CapabilityNegotiator: Sendable {
@@ -67,9 +141,14 @@ public struct CapabilityNegotiator: Sendable {
 public actor ConnectionRegistry {
     private var records: [UUID: ConnectionRecord] = [:]
     private let idleTimeout: TimeInterval
+    private let harnessIdentityValidator: any HarnessIdentityValidating
 
-    public init(idleTimeout: TimeInterval = 900) {
+    public init(
+        idleTimeout: TimeInterval = 900,
+        harnessIdentityValidator: any HarnessIdentityValidating = LiveHarnessIdentityValidator()
+    ) {
         self.idleTimeout = idleTimeout
+        self.harnessIdentityValidator = harnessIdentityValidator
     }
 
     public func open(
@@ -85,6 +164,26 @@ public actor ConnectionRegistry {
         guard peer.uid == kernelUID else { throw ConnectionValidationError.peerUIDMismatch }
         if let kernelPID, kernelPID > 0, peer.processID != kernelPID {
             throw ConnectionValidationError.peerPIDMismatch
+        }
+        guard !peer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              peer.name.utf16.count <= 256,
+              !peer.instanceID.isEmpty,
+              peer.instanceID.utf16.count <= 256 else {
+            throw ConnectionValidationError.unauthenticated
+        }
+        if peer.harnessIdentityVerified {
+            guard let harnessPID = peer.harnessProcessID, harnessPID > 1,
+                  let bundle = peer.harnessBundleIdentifier, !bundle.isEmpty,
+                  let signing = peer.harnessSigningIdentity, !signing.isEmpty,
+                  let started = peer.harnessProcessStartTimeUnixMs, started > 0 else {
+                throw ConnectionValidationError.unauthenticated
+            }
+        } else if peer.harnessProcessID != nil || peer.harnessBundleIdentifier != nil ||
+                    peer.harnessSigningIdentity != nil || peer.harnessProcessStartTimeUnixMs != nil {
+            throw ConnectionValidationError.unauthenticated
+        }
+        guard harnessIdentityValidator.isCurrent(peer) else {
+            throw ConnectionValidationError.peerIdentityChanged
         }
         guard ProtocolVersion.current.isCompatible(with: protocolVersion) else {
             throw ConnectionValidationError.incompatibleProtocol
@@ -115,6 +214,10 @@ public actor ConnectionRegistry {
         guard constantTimeEqual(record.capabilityToken, capabilityToken) else {
             throw ConnectionValidationError.connectionTokenMismatch
         }
+        guard harnessIdentityValidator.isCurrent(record.peer) else {
+            records.removeValue(forKey: connectionID)
+            throw ConnectionValidationError.peerIdentityChanged
+        }
         if record.isExpired(at: now) {
             records.removeValue(forKey: connectionID)
             throw ConnectionValidationError.expired
@@ -132,7 +235,9 @@ public actor ConnectionRegistry {
     }
 
     public func revokeExpired(now: Date = Date()) -> [UUID] {
-        let expired = records.values.filter { $0.isExpired(at: now) }.map(\.id)
+        let expired = records.values.filter {
+            $0.isExpired(at: now) || !harnessIdentityValidator.isCurrent($0.peer)
+        }.map(\.id)
         for id in expired { records.removeValue(forKey: id) }
         return expired
     }

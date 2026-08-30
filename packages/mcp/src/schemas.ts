@@ -48,7 +48,12 @@ export const ListDisplaysInputSchema = z
   .strict();
 
 export const ListAppsInputSchema = z
-  .object({ running_only: z.boolean().default(true) })
+  .object({
+    running_only: z
+      .literal(true)
+      .default(true)
+      .describe("V1 inventories running applications only")
+  })
   .strict();
 
 export const AppSelectorSchema = z.discriminatedUnion("kind", [
@@ -57,46 +62,53 @@ export const AppSelectorSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("path"), value: z.string().startsWith("/").max(4_096) }).strict()
 ]);
 
-export const AccessTargetInputSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("window"),
-      app: AppSelectorSchema,
-      window_hint: z.string().trim().min(1).max(500).optional(),
-      launch_if_needed: z.boolean().default(false)
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("display"),
-      display_id: OpaqueIdSchema
-    })
-    .strict()
-]);
-
-export const CapabilitySchema = z.enum(["observe", "interact", "clipboard_write"]);
-
-export const RequestAccessInputSchema = z
-  .object({
-    target: AccessTargetInputSchema,
-    reason: z.string().trim().min(1).max(500),
-    capabilities: z.array(CapabilitySchema).min(1).max(3).default(["observe", "interact"]),
-    timeout_ms: z.number().int().min(100).max(300_000).default(120_000)
-  })
-  .strict()
-  .superRefine((request, ctx) => {
-    const capabilities = new Set(request.capabilities);
-    if (capabilities.size !== request.capabilities.length) {
+export const AccessTargetInputSchema = z
+  .discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("window"),
+        app: AppSelectorSchema,
+        window_hint: z.string().trim().min(1).max(500).optional(),
+        launch_if_needed: z.boolean().default(false)
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("display"),
+        display_id: OpaqueIdSchema
+      })
+      .strict()
+  ])
+  .superRefine((target, ctx) => {
+    if (
+      target.kind === "window" &&
+      target.launch_if_needed &&
+      target.app.kind !== "bundle_id"
+    ) {
       ctx.addIssue({
         code: "custom",
-        path: ["capabilities"],
-        message: "Requested capabilities must be unique."
+        path: ["launch_if_needed"],
+        message: "launch_if_needed is available only with a bundle_id selector."
+      });
+    }
+  });
+
+export const CapabilitySchema = z.enum(["observe", "interact", "clipboard_write"]);
+export const CapabilitiesSchema = z
+  .array(CapabilitySchema)
+  .min(1)
+  .max(3)
+  .superRefine((items, ctx) => {
+    const capabilities = new Set(items);
+    if (capabilities.size !== items.length) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Capabilities must be unique."
       });
     }
     if (capabilities.has("interact") && !capabilities.has("observe")) {
       ctx.addIssue({
         code: "custom",
-        path: ["capabilities"],
         message: "The interact capability requires observe because every action is frame-bound."
       });
     }
@@ -106,11 +118,85 @@ export const RequestAccessInputSchema = z
     ) {
       ctx.addIssue({
         code: "custom",
-        path: ["capabilities"],
         message: "The clipboard_write capability requires both observe and interact."
       });
     }
   });
+
+// Named keys are deliberately finite so every value advertised by the public
+// MCP schema has an exact macOS virtual-key mapping. Single-character ANSI
+// keys remain available below for ordinary shortcuts and key chords.
+export const PUBLIC_NAMED_KEYS = [
+  "return",
+  "enter",
+  "tab",
+  "space",
+  "backspace",
+  "delete",
+  "forward_delete",
+  "forwarddelete",
+  "escape",
+  "esc",
+  "clear",
+  "help",
+  "insert",
+  "home",
+  "end",
+  "page_up",
+  "pageup",
+  "page_down",
+  "pagedown",
+  "left",
+  "arrow_left",
+  "right",
+  "arrow_right",
+  "up",
+  "arrow_up",
+  "down",
+  "arrow_down",
+  "f1",
+  "f2",
+  "f3",
+  "f4",
+  "f5",
+  "f6",
+  "f7",
+  "f8",
+  "f9",
+  "f10",
+  "f11",
+  "f12",
+  "f13",
+  "f14",
+  "f15",
+  "f16",
+  "f17",
+  "f18",
+  "f19",
+  "f20"
+] as const;
+
+const PUBLIC_ANSI_KEYS = [
+  "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+  "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+  "`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/"
+] as const;
+
+export const PublicKeySchema = z
+  .union([z.enum(PUBLIC_NAMED_KEYS), z.enum(PUBLIC_ANSI_KEYS)])
+  .describe(
+    "A documented named key (including F1-F20 and navigation/edit keys) or one lowercase ANSI key; use the shift modifier for uppercase chords"
+  );
+
+export const RequestAccessInputSchema = z
+  .object({
+    target: AccessTargetInputSchema,
+    reason: z.string().trim().min(1).max(500),
+    capabilities: CapabilitiesSchema.default(["observe", "interact"]),
+    timeout_ms: z.number().int().min(100).max(300_000).default(120_000)
+  })
+  .strict();
 
 export const ReleaseAccessInputSchema = z
   .object({
@@ -161,7 +247,7 @@ export const ScrollInputSchema = z
 
 export const PressKeyInputSchema = z
   .object({
-    key: z.string().min(1).max(64),
+    key: PublicKeySchema,
     modifiers: z
       .array(z.enum(["command", "control", "option", "shift", "function"]))
       .max(5)
@@ -230,6 +316,7 @@ const StatusSuccessSchema = z
     server_version: z.string().min(1),
     native_version: z.string().min(1),
     platform: z.literal("macos"),
+    app_control_enabled: z.boolean(),
     permissions: z
       .object({
         accessibility: PermissionStateSchema,
@@ -287,7 +374,8 @@ const WindowTargetMetadataSchema = z
       .object({
         bundle_id: z.string().min(1).max(512),
         name: z.string().min(1).max(512),
-        pid: z.number().int().positive()
+        pid: z.number().int().positive(),
+        bundle_path: z.string().startsWith("/").max(4_096).optional()
       })
       .strict(),
     title: z.string().max(2_000).optional(),
@@ -314,7 +402,7 @@ const AccessGrantedSchema = z
     status: z.literal("granted"),
     grant_id: OpaqueIdSchema,
     target: TargetMetadataSchema,
-    capabilities: z.array(CapabilitySchema),
+    capabilities: CapabilitiesSchema,
     idle_expires_at: TimestampSchema,
     session_only: z.boolean()
   })

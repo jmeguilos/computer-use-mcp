@@ -7,13 +7,15 @@ high impact.
 
 ## Supported versions
 
-Only the newest tagged release is eligible for security fixes. During the alpha
-period, fixes may require an immediate upgrade and may include breaking protocol
-or configuration changes.
+No tagged release exists yet. Until the first source alpha is published, report
+issues against the exact commit under test. After publication, only the newest
+tagged release is eligible for security fixes. During the alpha period, fixes
+may require an immediate upgrade and may include breaking protocol or
+configuration changes.
 
 | Version | Supported |
 | --- | --- |
-| `0.1.0-alpha.1` | Yes |
+| `0.1.0-alpha.1` | Release candidate; not tagged |
 | Earlier snapshots | No |
 
 ## Report a vulnerability privately

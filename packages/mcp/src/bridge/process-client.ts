@@ -17,6 +17,7 @@ import {
   NATIVE_CAPABILITIES,
   NATIVE_MAX_LINE_BYTES,
   NATIVE_PROTOCOL,
+  NativeApprovalRequiredDetailsSchema,
   WireResponseSchema,
   type BridgeCallOptions,
   type NativeBridge,
@@ -372,17 +373,18 @@ export class BridgeProcessClient implements NativeBridge {
       return;
     }
     if (parsed.data.error.code === "approval_required") {
-      if (parsed.data.error.details === undefined) {
+      const details = NativeApprovalRequiredDetailsSchema.safeParse(parsed.data.error.details);
+      if (!details.success) {
         pending.reject(
           new ComputerUseError(
             "BRIDGE_PROTOCOL_ERROR",
-            "The native bridge omitted approval challenge details."
+            "The native bridge returned malformed approval challenge details."
           )
         );
         return;
       }
       pending.reject(
-        new NativeApprovalRequiredError(parsed.data.error.message, parsed.data.error.details)
+        new NativeApprovalRequiredError(parsed.data.error.message, details.data)
       );
       return;
     }

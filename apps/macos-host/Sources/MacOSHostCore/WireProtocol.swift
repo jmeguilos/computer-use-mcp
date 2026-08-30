@@ -156,7 +156,11 @@ public enum WireCodec {
             throw WireCodecError.unknownField
         }
         if let client = object["client"] as? [String: Any],
-           !Set(client.keys).isSubset(of: ["name", "pid", "uid", "instanceId"]) {
+           !Set(client.keys).isSubset(of: [
+               "name", "pid", "uid", "instanceId", "harnessProcessID",
+               "harnessBundleIdentifier", "harnessSigningIdentity",
+               "harnessProcessStartTimeUnixMs", "harnessIdentityVerified",
+           ]) {
             throw WireCodecError.unknownField
         }
         return try JSONDecoder().decode(WireRequest.self, from: data)

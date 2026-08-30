@@ -47,6 +47,137 @@ public enum CaptureError: String, Error, Codable, Equatable, Sendable {
     case imageEncodingFailed
     case imageTooLarge
     case captureFailed
+    case captureTimedOut
+}
+
+/// Bridges callback-only ScreenCaptureKit APIs into structured concurrency.
+/// Cancellation, deadline expiry, and the framework callback all compete to
+/// complete the same locked state. Exactly one result resumes the checked
+/// continuation; callbacks arriving after cancellation or expiry are ignored.
+final class ScreenCaptureCallbackBridge<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var terminalResult: Result<Value, Error>?
+    private var deadlineWorkItem: DispatchWorkItem?
+    private var isFinished = false
+
+    static func awaitValue(
+        deadline: Date,
+        start: (@escaping @Sendable (Result<Value, Error>) -> Void) -> Void
+    ) async throws -> Value {
+        let bridge = ScreenCaptureCallbackBridge<Value>()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            let value = try await withCheckedThrowingContinuation { continuation in
+                guard bridge.install(continuation) else { return }
+                if Task.isCancelled {
+                    bridge.finish(.failure(CancellationError()))
+                    return
+                }
+                bridge.scheduleDeadline(deadline)
+                if Task.isCancelled {
+                    bridge.finish(.failure(CancellationError()))
+                    return
+                }
+                start { [weak bridge] result in
+                    bridge?.finish(result)
+                }
+            }
+            try Task.checkCancellation()
+            return value
+        } onCancel: {
+            bridge.finish(.failure(CancellationError()))
+        }
+    }
+
+    /// Returns false when cancellation or expiry won before the continuation
+    /// was installed. In that case this method resumes it with the stored
+    /// terminal result and the underlying callback operation must not start.
+    private func install(_ value: CheckedContinuation<Value, Error>) -> Bool {
+        let result: Result<Value, Error>?
+        lock.lock()
+        if isFinished {
+            result = terminalResult
+            terminalResult = nil
+        } else {
+            continuation = value
+            result = nil
+        }
+        lock.unlock()
+
+        if let result {
+            value.resume(with: result)
+            return false
+        }
+        return true
+    }
+
+    private func scheduleDeadline(_ deadline: Date) {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.finish(.failure(CaptureError.captureTimedOut))
+        }
+        lock.lock()
+        let alreadyFinished = isFinished
+        if !alreadyFinished { deadlineWorkItem = workItem }
+        lock.unlock()
+
+        guard !alreadyFinished else {
+            workItem.cancel()
+            return
+        }
+        let delay = max(0, deadline.timeIntervalSinceNow)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
+    }
+
+    private func finish(_ result: Result<Value, Error>) {
+        let value: CheckedContinuation<Value, Error>?
+        let workItem: DispatchWorkItem?
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        value = continuation
+        continuation = nil
+        if value == nil { terminalResult = result }
+        workItem = deadlineWorkItem
+        deadlineWorkItem = nil
+        lock.unlock()
+
+        workItem?.cancel()
+        value?.resume(with: result)
+    }
+}
+
+public struct CaptureExcludedProcessIdentity: Equatable, Sendable {
+    public let processID: Int32
+    public let bundleIdentifier: String
+    public let signingIdentity: String
+    public let processStartTimeUnixMs: Int64
+
+    public init(
+        processID: Int32,
+        bundleIdentifier: String,
+        signingIdentity: String,
+        processStartTimeUnixMs: Int64
+    ) {
+        self.processID = processID
+        self.bundleIdentifier = bundleIdentifier
+        self.signingIdentity = signingIdentity
+        self.processStartTimeUnixMs = processStartTimeUnixMs
+    }
+
+    func matches(_ identity: WindowIdentity?) -> Bool {
+        guard let identity else { return false }
+        return processID == identity.processID &&
+            bundleIdentifier == identity.bundleIdentifier &&
+            signingIdentity == identity.signingIdentity &&
+            processStartTimeUnixMs == identity.processStartTimeUnixMs
+    }
 }
 
 struct DisplayCaptureProtectedApplicationFingerprint: Hashable, Sendable {
@@ -143,6 +274,26 @@ enum DisplayCaptureProtectionGate {
     }
 }
 
+/// A captured window image remains private until a second inventory proves
+/// that the exact descriptor is unchanged and still outside protected policy.
+enum WindowCaptureReleaseGate {
+    static func release<Value>(
+        _ captured: Value,
+        before: WindowDescriptor,
+        after: WindowDescriptor,
+        expectedIdentity: WindowIdentity,
+        protectedPolicy: ProtectedProcessPolicy
+    ) throws -> Value {
+        guard ScreenCaptureService.matchesExpectedIdentity(
+            after,
+            expectedIdentity: expectedIdentity
+        ) else { throw CaptureError.targetIdentityChanged }
+        guard protectedPolicy.evaluate(after).allowed else { throw CaptureError.protectedTarget }
+        guard after == before else { throw CaptureError.targetIdentityChanged }
+        return captured
+    }
+}
+
 public protocol ScreenCaptureServing: Sendable {
     func inventory() async throws -> InventorySnapshot
     func captureWindow(
@@ -152,11 +303,13 @@ public protocol ScreenCaptureServing: Sendable {
     ) async throws -> ScreenshotPayload
     func captureDisplay(
         displayID: UInt32,
-        policy: ScreenshotSizingPolicy
+        policy: ScreenshotSizingPolicy,
+        excludingProcess: CaptureExcludedProcessIdentity?
     ) async throws -> ScreenshotPayload
 }
 
 public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendable {
+    private static let maximumCallbackDuration: TimeInterval = 30
     private let permissionChecker: SystemPermissionChecking
     private let protectedPolicy: ProtectedProcessPolicy
     private let currentProcessID: Int32
@@ -260,12 +413,35 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
             filter: filter,
             configuration: Self.configuration(for: transform, singleWindow: true)
         )
-        return try Self.payload(image: image, transform: transform, maximumDecodedBytes: policy.maximumDecodedBytes)
+        try Task.checkCancellation()
+        let afterContent = try await shareableContent()
+        try Task.checkCancellation()
+        guard permissionChecker.snapshot().screenCapture == .granted else {
+            throw CaptureError.permissionDenied
+        }
+        guard let afterWindow = afterContent.windows.first(where: { $0.windowID == windowID }),
+              let afterDescriptor = Self.makeWindowDescriptor(afterWindow) else {
+            throw CaptureError.windowNotFound
+        }
+        let verifiedImage = try WindowCaptureReleaseGate.release(
+            image,
+            before: descriptor,
+            after: afterDescriptor,
+            expectedIdentity: expectedIdentity,
+            protectedPolicy: protectedPolicy
+        )
+        try Task.checkCancellation()
+        return try Self.payload(
+            image: verifiedImage,
+            transform: transform,
+            maximumDecodedBytes: policy.maximumDecodedBytes
+        )
     }
 
     public func captureDisplay(
         displayID: UInt32,
-        policy: ScreenshotSizingPolicy = ScreenshotSizingPolicy()
+        policy: ScreenshotSizingPolicy = ScreenshotSizingPolicy(),
+        excludingProcess: CaptureExcludedProcessIdentity? = nil
     ) async throws -> ScreenshotPayload {
         try Task.checkCancellation()
         guard permissionChecker.snapshot().screenCapture == .granted else { throw CaptureError.permissionDenied }
@@ -273,7 +449,7 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         try Task.checkCancellation()
         guard let display = content.displays.first(where: { $0.displayID == displayID }),
               let descriptor = Self.makeDisplayIdentity(display) else { throw CaptureError.displayNotFound }
-        let beforeProtection = protectionSnapshot(content)
+        let beforeProtection = protectionSnapshot(content, excludingProcess: excludingProcess)
         let transform = try ScreenshotTransform.make(
             sourceSize: descriptor.logicalSize,
             globalOrigin: descriptor.frame.origin,
@@ -291,6 +467,11 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
             guard let application = window.owningApplication else { return nil }
             return application.processID
         })
+        let dynamicallyExcludedProcessIDs = Set(content.applications.compactMap { application -> Int32? in
+            matches(application: application, exclusion: excludingProcess)
+                ? application.processID
+                : nil
+        })
         let candidates = content.windows.map { window -> DisplayCaptureWindowCandidate in
             let application = window.owningApplication
             let applicationIsProtected = application.map {
@@ -305,7 +486,8 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
                 frame: Rect(window.frame),
                 isOnScreen: window.isOnScreen,
                 isCurrentHost: application?.processID == currentProcessID ||
-                    application?.bundleIdentifier == bundleIdentifier,
+                    application?.bundleIdentifier == bundleIdentifier ||
+                    application.map { dynamicallyExcludedProcessIDs.contains($0.processID) } == true,
                 applicationIsProtected: applicationIsProtected,
                 surfaceIsProtected: isProtectedSurface(window),
                 ownerHasProtectedSurface: application.map {
@@ -341,7 +523,7 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         let verifiedImage = try DisplayCaptureProtectionGate.release(
             image,
             before: beforeProtection,
-            after: protectionSnapshot(afterContent)
+            after: protectionSnapshot(afterContent, excludingProcess: excludingProcess)
         )
         try Task.checkCancellation()
         let payload = try Self.payload(
@@ -353,9 +535,13 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         return payload
     }
 
-    private func protectionSnapshot(_ content: SCShareableContent) -> DisplayCaptureProtectionSnapshot {
+    private func protectionSnapshot(
+        _ content: SCShareableContent,
+        excludingProcess: CaptureExcludedProcessIdentity?
+    ) -> DisplayCaptureProtectionSnapshot {
         let applications = Set(content.applications.compactMap { application -> DisplayCaptureProtectedApplicationFingerprint? in
             let excluded = application.processID == currentProcessID ||
+                matches(application: application, exclusion: excludingProcess) ||
                 protectedPolicy.excludesApplicationFromDisplayCapture(
                     bundleIdentifier: application.bundleIdentifier,
                     processName: application.applicationName,
@@ -401,6 +587,22 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         return DisplayCaptureProtectionSnapshot(applications: applications, windows: windows)
     }
 
+    private func matches(
+        application: SCRunningApplication,
+        exclusion: CaptureExcludedProcessIdentity?
+    ) -> Bool {
+        guard let exclusion,
+              application.processID == exclusion.processID,
+              application.bundleIdentifier == exclusion.bundleIdentifier else {
+            return false
+        }
+        // This is a privacy exclusion, not an authorization decision. Once
+        // the verified connection identifies a PID+bundle pair, a transient
+        // launch-date or code-signing lookup failure must omit more pixels,
+        // never admit that app's windows into a display capture.
+        return true
+    }
+
     private func isProtectedSurface(_ window: SCWindow) -> Bool {
         guard let application = window.owningApplication else { return true }
         let decision = protectedPolicy.evaluateSurface(
@@ -413,21 +615,32 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
     }
 
     private func shareableContent() async throws -> SCShareableContent {
-        try await withCheckedThrowingContinuation { continuation in
+        try await ScreenCaptureCallbackBridge<SCShareableContent>.awaitValue(
+            deadline: callbackDeadline()
+        ) { resolve in
             SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { content, error in
-                if let content { continuation.resume(returning: content) }
-                else { continuation.resume(throwing: error ?? CaptureError.invalidContent) }
+                if let content { resolve(.success(content)) }
+                else { resolve(.failure(error ?? CaptureError.invalidContent)) }
             }
         }
     }
 
     private func captureImage(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws -> CGImage {
-        try await withCheckedThrowingContinuation { continuation in
+        try await ScreenCaptureCallbackBridge<CGImage>.awaitValue(
+            deadline: callbackDeadline()
+        ) { resolve in
             SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
-                if let image { continuation.resume(returning: image) }
-                else { continuation.resume(throwing: error ?? CaptureError.captureFailed) }
+                if let image { resolve(.success(image)) }
+                else { resolve(.failure(error ?? CaptureError.captureFailed)) }
             }
         }
+    }
+
+    private func callbackDeadline(now: Date = Date()) -> Date {
+        min(
+            HostRequestTaskContext.deadline ?? .distantFuture,
+            now.addingTimeInterval(Self.maximumCallbackDuration)
+        )
     }
 
     static func matchesExpectedIdentity(

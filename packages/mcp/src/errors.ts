@@ -1,7 +1,9 @@
 import * as z from "zod/v4";
 
 export const ToolErrorCodeSchema = z.enum([
+  "INVALID_REQUEST",
   "PERMISSION_REQUIRED",
+  "APP_CONTROL_DISABLED",
   "ACCESS_DENIED",
   "APP_NOT_RUNNING",
   "WINDOW_NOT_GRANTED",

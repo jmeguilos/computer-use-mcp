@@ -82,7 +82,15 @@ export const WindowTargetSchema = z.object({
   app: AppSelectorSchema,
   window_hint: z.string().trim().min(1).max(500).optional(),
   launch_if_needed: z.boolean().default(false)
-}).strict();
+}).strict().superRefine((target, context) => {
+  if (target.launch_if_needed && target.app.kind !== "bundle_id") {
+    context.addIssue({
+      code: "custom",
+      path: ["launch_if_needed"],
+      message: "launch_if_needed is available only with a bundle_id selector"
+    });
+  }
+});
 
 export const DisplayTargetSchema = z.object({
   kind: z.literal("display"),
@@ -157,6 +165,7 @@ export const CoordinateTransformSchema = z.object({
 export const ErrorCodeSchema = z.enum([
   "INVALID_REQUEST",
   "PERMISSION_REQUIRED",
+  "APP_CONTROL_DISABLED",
   "ACCESS_DENIED",
   "APP_NOT_RUNNING",
   "WINDOW_NOT_GRANTED",
@@ -190,8 +199,28 @@ export const PeerIdentitySchema = z.object({
   uid: z.number().int().min(0).max(4_294_967_295),
   pid: z.number().int().min(2).max(2_147_483_647),
   name: z.string().min(1).max(256),
-  instanceId: z.string().min(1).max(512)
-}).strict();
+  instanceId: z.string().min(1).max(512),
+  harnessProcessID: z.number().int().min(2).max(2_147_483_647).optional(),
+  harnessBundleIdentifier: z.string().min(1).max(512).optional(),
+  harnessSigningIdentity: z.string().min(1).max(512).optional(),
+  harnessProcessStartTimeUnixMs: z.number().int().positive().optional(),
+  harnessIdentityVerified: z.boolean()
+}).strict().superRefine((value, context) => {
+  const identityFields = [
+    value.harnessProcessID,
+    value.harnessBundleIdentifier,
+    value.harnessSigningIdentity,
+    value.harnessProcessStartTimeUnixMs
+  ];
+  const populated = identityFields.filter(field => field !== undefined).length;
+  if ((value.harnessIdentityVerified && populated !== identityFields.length) ||
+      (!value.harnessIdentityVerified && populated !== 0)) {
+    context.addIssue({
+      code: "custom",
+      message: "Verified harness identity fields must be complete and unverified peers must omit them"
+    });
+  }
+});
 
 export const HelloRequestSchema = z.object({
   protocol: ProtocolVersionSchema,

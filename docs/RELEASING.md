@@ -28,6 +28,12 @@ to this repository with read-only **Administration** permission as the protected
 uses it only to verify that release immutability is enabled before it creates a
 release, then independently checks the published release's immutable status.
 
+Dependency review runs twice for distinct boundaries: pull requests compare the
+full base and head commit SHAs, while each push to `main` compares the push's full
+before and head SHAs. The source and signed release workflows require a
+successful `Dependency review` push workflow whose `head_sha` is the exact
+tagged commit; a pull-request result alone is not release evidence.
+
 Complete the interactive matrix in [Manual acceptance](../tests/MANUAL_ACCEPTANCE.md)
 from the exact commit, then set `ALPHA_MANUAL_ACCEPTANCE_SHA` to that full commit
 SHA. The release workflow rejects a tag whose commit does not equal the recorded
@@ -54,6 +60,7 @@ From a clean checkout:
 
 ```sh
 npm ci
+npm run version:verify
 npm run verify
 npm run sbom
 git status --short
@@ -78,8 +85,11 @@ them from the tagged checkout.
 Pushing the protected tag triggers `.github/workflows/release-source.yml`. It:
 
 1. checks out the exact tag with no persisted credentials;
-2. installs locked dependencies;
-3. reruns provenance, TypeScript, native, packaging, and source-only checks;
+2. verifies mainline ancestry, exact-commit manual acceptance, version/tag
+   agreement, and successful `CI`, `CodeQL`, `Dependency review`, and `SBOM`
+   push workflows for that commit;
+3. installs locked dependencies, then reruns provenance, TypeScript, native,
+   packaging, and source-only checks;
 4. runs `npm pack` and verifies that the archive contains no native bundle or
    install lifecycle script;
 5. creates SPDX/CycloneDX SBOMs and SHA-256 checksums;

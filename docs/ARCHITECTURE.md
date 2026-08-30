@@ -2,15 +2,17 @@
 
 ## Design goals
 
-Computer Use MCP is designed around five invariants:
+Computer Use MCP is designed around six invariants:
 
 1. macOS privacy permissions belong to one visible, auditable native app;
-2. a client receives no computer-control authority until the user approves a
+2. a persisted native master switch defaults off and fails closed before any
+   client can inspect or control another app;
+3. a client receives no computer-control authority until the user approves a
    target and capabilities in native UI;
-3. normal access is scoped to one window and revalidated before every operation;
-4. the user can always see and stop active control without returning to the MCP
+4. normal access is scoped to one window and revalidated before every operation;
+5. the user can always see and stop active control without returning to the MCP
    client; and
-5. client compatibility does not weaken the native security boundary.
+6. client compatibility does not weaken the native security boundary.
 
 The implementation deliberately separates protocol adaptation from privileged
 macOS work.
@@ -41,7 +43,10 @@ release-eligible peer for the host's Unix-domain socket. Its bundle identifier i
 `com.jmeguilos.computer-use-mcp.bridge`. It presents a bootstrap socket audit
 token, and the host verifies kernel UID/PID plus the helper's designated
 code-signing requirement and expected team identity before issuing a short-lived
-connection capability.
+connection capability. Before it forwards the first hello, the bridge performs
+the reciprocal check: it reads the server's kernel UID/PID/audit token, pins the
+peer to the sibling host executable path and signing requirement, and in release
+mode requires the expected host bundle and the same Developer ID team.
 
 That signing check applies to a Developer ID-signed release. The source alpha's
 explicit development mode uses an ad-hoc signature and instead enforces the
@@ -53,10 +58,18 @@ mode-`0600`, same-user marker so macOS permission-related Quit & Reopen launches
 remain usable; a release-signed host always ignores that marker. Use source mode
 only with non-sensitive data.
 
-In a signed release, compromising the Node adapter is not sufficient to make an
-arbitrary same-user process a trusted socket peer. The adapter can still drive
-the helper it spawned within the connection and user grants it obtains, which is
-why target and action checks remain in the host.
+In a signed release, the socket check proves that the direct peer is the genuine
+bridge rather than an unsigned replacement. It does not authenticate the bridge's
+parent: any same-user harness can execute the genuine helper and ask it to open a
+connection. The bridge discards caller-supplied names and instance IDs. Instead,
+it walks its process ancestry to the nearest GUI application for which it can
+bind a PID, bundle ID, designated-signing identity, and process generation; if
+none is available, it presents **Unidentified local MCP harness**. This verified
+process-ancestry attribution supports truthful display and self-exclusion, but it
+does not authorize the ancestor or prevent another same-user process from
+invoking the genuine bridge. The host treats every caller as untrusted until
+native UI grants an exact target, and its connection-, grant-, frame-, and
+one-shot action checks remain authoritative.
 
 ### Native macOS host
 
@@ -71,13 +84,17 @@ The native host owns:
 - Accessibility inspection and semantic actions;
 - Core Graphics event synthesis where a semantic action is unavailable;
 - Screen Recording and Accessibility status and onboarding;
+- durable fail-closed host preferences and the first-run/settings window;
 - target selection, grants, revocation, expiry, and risk approval;
 - the left-edge indicator and emergency Stop control;
 - protected-target policy and session-lock handling; and
 - privacy-preserving local audit metadata.
 
-Only public macOS frameworks are in the normal driver path. A private driver is
-not silently selected; the alpha reports it as unsupported.
+Only public macOS frameworks are in the normal driver path. The optional
+targeted private-driver path is disabled by default and version-gated. It is not
+silently selected; when the current operating-system build is unsupported or no
+validated alpha implementation exists, the host reports it unavailable and
+fails closed.
 
 ### Host socket
 
@@ -90,11 +107,15 @@ per-user Unix-domain socket:
 
 The containing directory is mode `0700`, and the socket and bootstrap audit token
 are mode `0600`. `COMPUTER_USE_MCP_SOCKET_PATH` may override the path for isolated
-development and tests. The host checks kernel peer credentials and signing
-identity in release-signed mode, requires a token-authenticated hello, negotiates
-protocol and capabilities, and assigns a connection ID and capability. Explicit
-source-development mode deliberately omits the signing-identity check described
-above. A connection capability alone is not a target grant.
+development and tests. The host authenticates the incoming bridge, while the
+bridge authenticates the connected host before sending hello. Both sides inspect
+kernel peer credentials; each side enforces its expected bundle/team signing
+identity in release mode, and the bridge additionally pins the server to the
+sibling host path and signing requirement. The host then requires a
+token-authenticated hello, negotiates protocol and capabilities, and assigns a
+connection ID and capability. Explicit source-development mode deliberately
+omits the host-side bridge-signing check described above, while the bridge still
+pins the source host peer. A connection capability alone is not a target grant.
 
 The bridge is intentionally not TCP, HTTP, WebSocket, XPC with an anonymous
 service name, or a fixed unauthenticated port. It has no network listener. A
@@ -105,34 +126,67 @@ for release.
 ### Indicator and approval UI
 
 An original 8-point-wide rail tracks the left edge of the granted window. A
-compact, non-activating panel identifies the harness, mode, and target and
-exposes the Stop control.
+compact, non-activating panel shows requester attribution, mode, and target and
+exposes the Stop control. On the normal bridge path the identity is derived from
+the nearest verifiable GUI process ancestor (or shown as **Unidentified local MCP
+harness**); explicit source-development direct-peer attribution is untrusted.
+The displayed attribution is not an authorization decision.
 
 The indicator is excluded from capture where public APIs permit. It never
 pretends to be a macOS consent dialog, and it does not steal keyboard focus from
 the target merely to update status. If the indicator cannot be placed
 truthfully—for example, because the target disappeared—the grant fails closed.
 
+The indicator is also the v1 human-takeover boundary. The user presses the
+target's Stop control to revoke one grant or uses Emergency Stop in the menu-bar
+item to revoke all grants. The host does not monitor global user input, so local
+clicks or keystrokes do not by themselves atomically pause a client.
+
+### First-run and settings UI
+
+The native host is a menu-bar accessory app. When its stored onboarding revision
+is older than the current revision, it presents one original AppKit Computer
+Control window. Selecting Done attempts to durably record that revision;
+completion exists only after the protected write succeeds. Closing without Done
+or a failed write leaves it incomplete so setup appears again on the next
+launch. Later launches remain menu-bar-only after completion until the user
+chooses **Computer Control Settings…**.
+
+The window owns no target authority. It presents:
+
+- a persisted **General app access** master switch, off by default;
+- separate Screen Recording and Accessibility rows with refresh actions;
+- a source-development trust-boundary warning when applicable; and
+- remembered signed-app decisions with per-app Remove and confirmed Remove All.
+
+Turning General app access off persists the off state before Emergency Stop
+revokes active grants. A read or persistence error must leave the policy off.
+Turning it on only permits native access requests; it does not modify TCC, select
+a target, or activate remembered app authority.
+
 ## Permission and grant layers
 
-There are three separate layers:
+There are four separate layers:
 
 | Layer | Grants | Scope | Controlled by |
 | --- | --- | --- | --- |
 | macOS TCC | Screen Recording, Accessibility | Application identity; system-defined | System Settings / MDM |
+| Native master policy | Permission to accept computer-use requests | This host, persisted; off by default | General app access switch |
 | Bridge connection | Named native protocol capabilities | One authenticated local client connection | Native host handshake |
 | Target grant | Observe, interact, clipboard write | Selected window; explicit display exception | Native approval UI |
 
 Passing one layer never bypasses another. In particular, macOS Screen Recording
 permission is system-wide for the app, while Computer Use MCP's window boundary
-is enforced by its own grant and target-validation code.
+is enforced by its own master policy, grant, and target-validation code. The
+two user-facing macOS rows remain separate; the Accessibility row includes AX
+trust and public event-posting permission, not Input Monitoring.
 
 ## Grant lifecycle
 
 1. A client starts the MCP adapter and calls `computer_request_access` with an
    app selector, reason, and requested capabilities.
-2. The native host verifies required TCC state, presents its own target picker,
-   and records the user's decision.
+2. The native host verifies that General app access is on and required TCC state
+   is present, presents its own target picker, and records the user's decision.
 3. A granted window is bound to its opaque window identifier, PID, bundle
    identifier, and signing identity when available. The connection receives
    an opaque `grant_id`, never an ambient host handle. Internal connection and
@@ -146,8 +200,15 @@ is enforced by its own grant and target-validation code.
 
 `always_allow_app` remembers a native approval policy for a matching signed app;
 it does not preserve a bearer token or an unbounded live session. Every new
-connection still receives fresh opaque IDs and is subject to current TCC and
-target state.
+connection still receives fresh opaque IDs and is subject to the master switch,
+current TCC, and target state. Remembering an app never selects a concrete
+window: every new grant requires an exact-window choice, including a sole or
+newly created window. Removing a remembered app affects future requests, not an
+already active grant.
+
+A display grant follows the same master-policy and TCC checks, but is approved
+separately for one display, is session-only, has no Accessibility tree, and is
+never persisted.
 
 ## Observation path
 
@@ -175,6 +236,11 @@ frame are revalidated. State results expose the exact image-to-global affine
 matrix and its global-to-image inverse so clients can reason about the same
 coordinate space without inventing a transform. Core Graphics input may require
 foreground focus and is never described as background-safe.
+
+An explicitly requested targeted private driver must pass both its enablement
+and operating-system version gates. The alpha has no universally supported
+private implementation; an unavailable path returns an error rather than
+downgrading target validation or silently choosing another private mechanism.
 
 Every action includes a short human-readable `intent`. The native risk engine
 classifies the normalized action:
@@ -223,6 +289,7 @@ concurrently, but a capture cannot extend a revoked grant.
 - a hidden daemon with unattended control;
 - bypassing TCC, secure input, protected content, lock screen, or application
   security boundaries;
+- locked use, lock-screen control, or unattended authentication;
 - promising background coordinate input on macOS;
 - OCR, keystroke capture, clipboard read, or persistent screenshot history;
 - private framework compatibility or pixel-identical replication of another

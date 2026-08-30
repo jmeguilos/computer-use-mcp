@@ -158,6 +158,14 @@ public actor GrantStore {
         return grants.values.filter { $0.connectionID == connectionID && $0.expiresAt > now }
             .sorted { $0.issuedAt < $1.issuedAt }
     }
+
+    public func active(now: Date = Date()) -> [AccessGrant] {
+        grants.values.filter { $0.expiresAt > now }
+            .sorted { lhs, rhs in
+                if lhs.issuedAt != rhs.issuedAt { return lhs.issuedAt < rhs.issuedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+    }
 }
 
 public struct FrameResource: Codable, Equatable, Sendable {
@@ -165,13 +173,16 @@ public struct FrameResource: Codable, Equatable, Sendable {
     public let grantID: UUID
     public let connectionID: UUID
     public let transform: ScreenshotTransform
+    /// Exact Accessibility session revision produced alongside this frame.
+    /// Nil means the frame deliberately contains no window AX snapshot.
+    public let accessibilityRevision: UInt64?
     public let createdAt: Date
     public let expiresAt: Date
     private enum CodingKeys: String, CodingKey {
         case frameID = "frameId"
         case grantID = "grantId"
         case connectionID = "connectionId"
-        case transform, createdAt, expiresAt
+        case transform, accessibilityRevision, createdAt, expiresAt
     }
 }
 
@@ -194,6 +205,7 @@ public actor FrameResourceStore {
         grantID: UUID,
         connectionID: UUID,
         transform: ScreenshotTransform,
+        accessibilityRevision: UInt64? = nil,
         now: Date = Date()
     ) -> FrameResource {
         if let previous = currentByGrant[grantID] { resources.removeValue(forKey: previous) }
@@ -202,6 +214,7 @@ public actor FrameResourceStore {
             grantID: grantID,
             connectionID: connectionID,
             transform: transform,
+            accessibilityRevision: accessibilityRevision,
             createdAt: now,
             expiresAt: now.addingTimeInterval(lifetime)
         )
@@ -275,16 +288,35 @@ public actor ControllerLockStore {
 
 public actor ActionExecutionGate {
     private var activeGrantIDs: Set<UUID> = []
+    private var syntheticInputGrantID: UUID?
 
     public init() {}
 
-    public func acquire(grantID: UUID) -> Bool {
-        activeGrantIDs.insert(grantID).inserted
+    /// Serializes every operation for one grant and all global synthetic input
+    /// (including pasteboard-backed paste) across grants. AX-only operations on
+    /// distinct targets may still run concurrently.
+    public func acquire(grantID: UUID, requiresGlobalSyntheticInput: Bool = false) -> Bool {
+        guard !activeGrantIDs.contains(grantID) else { return false }
+        if requiresGlobalSyntheticInput {
+            // A semantic action in another grant can still move focus, open a
+            // sheet, or mutate the global pasteboard. Begin synthetic input
+            // only when no other state/action operation is active.
+            guard activeGrantIDs.isEmpty, syntheticInputGrantID == nil else { return false }
+        } else if syntheticInputGrantID != nil {
+            // Once global input starts, block every other grant operation until
+            // focus and clipboard restoration are complete.
+            return false
+        }
+        activeGrantIDs.insert(grantID)
+        if requiresGlobalSyntheticInput { syntheticInputGrantID = grantID }
+        return true
     }
 
     public func release(grantID: UUID) {
         activeGrantIDs.remove(grantID)
+        if syntheticInputGrantID == grantID { syntheticInputGrantID = nil }
     }
 
     public func isActive(grantID: UUID) -> Bool { activeGrantIDs.contains(grantID) }
+    public func hasActiveSyntheticInput() -> Bool { syntheticInputGrantID != nil }
 }

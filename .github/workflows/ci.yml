@@ -48,17 +48,13 @@ jobs:
         run: npm run provenance:scan
 
       - name: Validate checked-in client JSON
-        run: >-
-          node -e 'for (const file of
-          ["examples/claude-desktop-config.json","examples/claude-code.mcp.json","examples/cursor-mcp.json"])
-          JSON.parse(require("node:fs").readFileSync(file,"utf8"))'
+        run: npm run examples:validate
+
+      - name: Verify every release version surface agrees
+        run: npm run version:verify
 
       - name: Lint public Markdown
-        run: >-
-          npm exec -- markdownlint-cli2 --config
-          .github/markdownlint-cli2.jsonc README.md SECURITY.md CONTRIBUTING.md
-          PRIVACY.md THIRD_PARTY_NOTICES.md 'docs/**/*.md' 'examples/**/*.md'
-          'sbom/**/*.md' 'tests/**/*.md' '.github/**/*.md'
+        run: npm run markdown:lint
 
       - name: Lint
         run: npm run lint
@@ -116,13 +112,13 @@ jobs:
       - name: Verify universal source build
         run: bash scripts/build-universal.sh
 
-      - name: Assemble and validate non-published smoke bundles
+      - name: Assemble, launch, and validate non-published smoke bundles
         run: |
           host_app="$RUNNER_TEMP/ComputerUseMCPHost.app"
           bash apps/macos-host/Scripts/assemble-app.sh \
             --adhoc-sign --output "$host_app"
           bash apps/macos-host/Scripts/validate-app.sh "$host_app"
-          fixture_app="$(bash apps/macos-host/Scripts/run-fixture.sh --assemble-only)"
+          fixture_app="$(bash apps/macos-host/Scripts/run-fixture.sh --runtime-smoke)"
           test -d "$fixture_app"
           codesign --verify --strict "$fixture_app"
 

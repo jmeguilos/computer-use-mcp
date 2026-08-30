@@ -26,7 +26,9 @@
     <string>14.4</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>Open source contributors</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Open source contributors</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Allows this local host to capture a window or display only after you approve a separate MCP access request.</string>
 </dict>
 </plist>

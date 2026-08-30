@@ -6,6 +6,8 @@ import Security
 public enum CanonicalRuntime {
     public static let socketEnvironmentKey = "COMPUTER_USE_MCP_SOCKET_PATH"
     public static let bridgeBundleIdentifier = "com.jmeguilos.computer-use-mcp.bridge"
+    public static let hostBundleIdentifier = "com.jmeguilos.computer-use-mcp.host"
+    public static let hostExecutableName = "ComputerUseMCPHost"
 
     public static func directory(fileManager: FileManager = .default) throws -> URL {
         let support = try fileManager.url(
@@ -337,12 +339,21 @@ public protocol PeerCodeVerifying: Sendable {
 /// configured Team ID. An unsigned/ad-hoc peer cannot satisfy this requirement.
 public struct ReleasePeerCodeVerifier: PeerCodeVerifying {
     public let teamIdentifier: String
+    public let bundleIdentifier: String
 
-    public init(teamIdentifier: String) throws {
+    public init(
+        teamIdentifier: String,
+        bundleIdentifier: String = CanonicalRuntime.bridgeBundleIdentifier
+    ) throws {
         guard !teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LocalSecurityError.missingTeamIdentifier
         }
+        guard !bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !bundleIdentifier.contains("\"") else {
+            throw LocalSecurityError.invalidSigningRequirement
+        }
         self.teamIdentifier = teamIdentifier
+        self.bundleIdentifier = bundleIdentifier
     }
 
     public func verify(_ peer: SocketPeerCredentials) throws {
@@ -354,12 +365,113 @@ public struct ReleasePeerCodeVerifier: PeerCodeVerifying {
         guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess,
               let guest else { throw LocalSecurityError.signatureUnavailable }
         let escapedTeam = teamIdentifier.replacingOccurrences(of: "\"", with: "")
-        let requirementText = "identifier \"\(CanonicalRuntime.bridgeBundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(escapedTeam)\""
+        let requirementText = "identifier \"\(bundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(escapedTeam)\""
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
               let requirement else { throw LocalSecurityError.invalidSigningRequirement }
         guard SecCodeCheckValidity(guest, [], requirement) == errSecSuccess else {
             throw LocalSecurityError.signatureRejected
+        }
+    }
+}
+
+/// Pins a socket peer to the exact signed executable shipped beside the
+/// caller. This protects source-development builds from a replacement socket
+/// server without pretending that a user-writable source app is a hardened
+/// system boundary.
+public struct PinnedExecutablePeerCodeVerifier: PeerCodeVerifying {
+    public let executableURL: URL
+
+    public init(executableURL: URL) throws {
+        let resolved = executableURL.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.isFileURL, resolved.path.hasPrefix("/") else {
+            throw LocalSecurityError.invalidSigningRequirement
+        }
+        self.executableURL = resolved
+    }
+
+    public func verify(_ peer: SocketPeerCredentials) throws {
+        guard peer.auditToken.count == MemoryLayout<audit_token_t>.size else {
+            throw LocalSecurityError.auditTokenUnavailable
+        }
+        let attributes = [kSecGuestAttributeAudit as String: peer.auditToken as CFData] as CFDictionary
+        var guest: SecCode?
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess,
+              let guest else { throw LocalSecurityError.signatureUnavailable }
+
+        var expectedStatic: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &expectedStatic) == errSecSuccess,
+              let expectedStatic else { throw LocalSecurityError.signatureUnavailable }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(expectedStatic, [], &requirement) == errSecSuccess,
+              let requirement else { throw LocalSecurityError.invalidSigningRequirement }
+        guard SecCodeCheckValidity(
+            guest,
+            [],
+            requirement
+        ) == errSecSuccess else { throw LocalSecurityError.signatureRejected }
+
+        // proc_info.h defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN, but
+        // the macro is not imported by the Swift overlay.
+        var pathBuffer = [CChar](repeating: 0, count: 4_096)
+        let pathLength = proc_pidpath(peer.processID, &pathBuffer, UInt32(pathBuffer.count))
+        guard pathLength > 0 else { throw LocalSecurityError.signatureUnavailable }
+        let resolvedGuest = URL(fileURLWithPath: String(cString: pathBuffer))
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard resolvedGuest == executableURL else { throw LocalSecurityError.signatureRejected }
+    }
+}
+
+public struct CompositePeerCodeVerifier: PeerCodeVerifying {
+    public let verifiers: [any PeerCodeVerifying]
+
+    public init(_ verifiers: [any PeerCodeVerifying]) {
+        self.verifiers = verifiers
+    }
+
+    public func verify(_ peer: SocketPeerCredentials) throws {
+        for verifier in verifiers { try verifier.verify(peer) }
+    }
+}
+
+public enum BridgeHostPeerVerifierFactory {
+    public static func hostExecutableURL(forBridgeExecutable bridgeExecutableURL: URL) -> URL {
+        let bridge = bridgeExecutableURL.resolvingSymlinksInPath().standardizedFileURL
+        let directory = bridge.deletingLastPathComponent()
+        if directory.lastPathComponent == "Helpers",
+           directory.deletingLastPathComponent().lastPathComponent == "Contents" {
+            return directory
+                .deletingLastPathComponent()
+                .appendingPathComponent("MacOS", isDirectory: true)
+                .appendingPathComponent(CanonicalRuntime.hostExecutableName, isDirectory: false)
+        }
+        return directory.appendingPathComponent(CanonicalRuntime.hostExecutableName, isDirectory: false)
+    }
+
+    public static func make(
+        configuration: SocketConfiguration,
+        bridgeExecutableURL: URL = Bundle.main.executableURL
+            ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    ) throws -> any PeerCodeVerifying {
+        let hostURL = hostExecutableURL(forBridgeExecutable: bridgeExecutableURL)
+        let pinned = try PinnedExecutablePeerCodeVerifier(executableURL: hostURL)
+        switch PeerVerifierPolicy.select(
+            signingIdentity: try CurrentCodeIdentity.signingIdentity(),
+            sourceAuthorizationValid: DevelopmentModeAuthorization.validate(configuration: configuration)
+        ) {
+        case let .release(teamIdentifier):
+            return CompositePeerCodeVerifier([
+                try ReleasePeerCodeVerifier(
+                    teamIdentifier: teamIdentifier,
+                    bundleIdentifier: CanonicalRuntime.hostBundleIdentifier
+                ),
+                pinned,
+            ])
+        case .sourceDevelopment:
+            return pinned
+        case .denied:
+            throw LocalSecurityError.developmentModeDisabled
         }
     }
 }

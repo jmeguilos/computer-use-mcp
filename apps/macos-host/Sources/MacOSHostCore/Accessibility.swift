@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -112,6 +113,69 @@ public struct AccessibilityActionDescriptor: Equatable, Sendable {
     public let secure: Bool
     public let actions: [String]
     public let frame: Rect?
+    public let subrole: String?
+    public let title: String?
+    public let identifier: String?
+    public let help: String?
+    public let placeholder: String?
+    public let semanticContext: [String]
+
+    public init(
+        role: String,
+        label: String?,
+        secure: Bool,
+        actions: [String],
+        frame: Rect?,
+        subrole: String? = nil,
+        title: String? = nil,
+        identifier: String? = nil,
+        help: String? = nil,
+        placeholder: String? = nil,
+        semanticContext: [String] = []
+    ) {
+        self.role = role
+        self.label = label
+        self.secure = secure
+        self.actions = actions
+        self.frame = frame
+        self.subrole = subrole
+        self.title = title
+        self.identifier = identifier
+        self.help = help
+        self.placeholder = placeholder
+        self.semanticContext = semanticContext
+    }
+
+    /// Human-facing AX metadata only. Values and selected text are deliberately
+    /// absent so semantic classification never turns field contents into
+    /// approval or audit metadata.
+    public var semanticMetadata: [String] {
+        ([role, subrole, title, label, identifier, help, placeholder]
+            .compactMap { value in
+                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty else { return nil }
+                return value
+            }) + semanticContext
+    }
+
+    public var semanticLabel: String? {
+        [label, title, placeholder, help, identifier]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    public func hasSameControlSemantics(as other: AccessibilityActionDescriptor) -> Bool {
+        role == other.role
+            && subrole == other.subrole
+            && title == other.title
+            && label == other.label
+            && identifier == other.identifier
+            && help == other.help
+            && placeholder == other.placeholder
+            && semanticContext == other.semanticContext
+            && secure == other.secure
+            && actions.sorted() == other.actions.sorted()
+    }
 }
 
 public enum AccessibilityError: String, Error, Codable, Equatable, Sendable {
@@ -135,6 +199,71 @@ private final class AXElementBox: @unchecked Sendable {
     init(_ element: AXUIElement) { self.element = element }
 }
 
+/// Opaque, in-memory identity for one concrete AX window object. Retaining the
+/// object lets the host distinguish a same-process close/recreate cycle even if
+/// macOS later reuses the same public CGWindowID and metadata.
+public final class AccessibilityWindowBinding: @unchecked Sendable {
+    fileprivate let element: AXUIElement
+    fileprivate init(element: AXUIElement) { self.element = element }
+
+    /// Test doubles may retain this inert token. The production controller
+    /// always replaces it with a concrete, mapped AX window and therefore
+    /// cannot treat this helper as authority.
+    static func fixtureToken() -> AccessibilityWindowBinding {
+        AccessibilityWindowBinding(element: AXUIElementCreateSystemWide())
+    }
+}
+
+public protocol AccessibilityServing: Actor {
+    func state(
+        sessionID: UUID,
+        window: WindowDescriptor,
+        maximumNodes: Int,
+        maximumDepth: Int,
+        maximumCharacters: Int
+    ) throws -> AccessibilityState
+    func perform(
+        sessionID: UUID,
+        revision: UInt64,
+        command: AccessibilityCommand,
+        cancellation: any InteractionCancellationChecking
+    ) throws
+    func createWindowBinding(window: WindowDescriptor) throws -> AccessibilityWindowBinding
+    func validateWindowBinding(_ binding: AccessibilityWindowBinding, window: WindowDescriptor) throws
+    func validateWindowBinding(sessionID: UUID, window: WindowDescriptor) throws
+    func openWindowSession(
+        sessionID: UUID,
+        binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws
+    func refreshWindowBinding(sessionID: UUID, window: WindowDescriptor) throws -> UInt64
+    func validateFocusedWindow(sessionID: UUID, revision: UInt64) throws
+    func describeActionTarget(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int
+    ) throws -> AccessibilityActionDescriptor
+    func describeFocusedActionTarget(
+        sessionID: UUID,
+        revision: UInt64
+    ) throws -> AccessibilityActionDescriptor
+    func raise(
+        window: WindowDescriptor,
+        cancellation: any InteractionCancellationChecking
+    ) async throws
+    func selectText(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int,
+        text: String,
+        prefix: String?,
+        suffix: String?,
+        selectionType: String,
+        cancellation: any InteractionCancellationChecking
+    ) throws
+    func close(sessionID: UUID)
+}
+
 private struct AccessibilitySession: @unchecked Sendable {
     let window: WindowDescriptor
     let windowElement: AXElementBox
@@ -142,7 +271,7 @@ private struct AccessibilitySession: @unchecked Sendable {
     var elements: [Int: AXElementBox]
 }
 
-public actor AccessibilityController {
+public actor AccessibilityController: AccessibilityServing {
     private var sessions: [UUID: AccessibilitySession] = [:]
     private let permissionChecker: SystemPermissionChecking
 
@@ -160,7 +289,15 @@ public actor AccessibilityController {
         guard permissionChecker.snapshot().accessibility == .granted else {
             throw AccessibilityError.permissionDenied
         }
-        let windowElement = try mapWindow(window)
+        let mappedWindowElement = try mapWindow(window)
+        let priorSession = sessions[sessionID]
+        if let priorSession {
+            guard priorSession.window.identity == window.identity,
+                  CFEqual(priorSession.windowElement.element, mappedWindowElement) else {
+                throw AccessibilityError.windowNotFound
+            }
+        }
+        let windowElement = priorSession?.windowElement.element ?? mappedWindowElement
         var nodes: [AccessibilityNodeSnapshot] = []
         var elements: [Int: AXElementBox] = [:]
         var truncated = false
@@ -234,7 +371,7 @@ public actor AccessibilityController {
         }
 
         visit(windowElement, parentID: nil, depth: 0, ancestorSecure: false)
-        let revision = (sessions[sessionID]?.revision ?? 0) + 1
+        let revision = (priorSession?.revision ?? 0) + 1
         sessions[sessionID] = AccessibilitySession(
             window: window,
             windowElement: AXElementBox(windowElement),
@@ -306,6 +443,106 @@ public actor AccessibilityController {
         }
     }
 
+    public func createWindowBinding(window: WindowDescriptor) throws -> AccessibilityWindowBinding {
+        guard permissionChecker.snapshot().accessibility == .granted else {
+            throw AccessibilityError.permissionDenied
+        }
+        return AccessibilityWindowBinding(element: try mapWindow(window))
+    }
+
+    public func validateWindowBinding(
+        _ binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {
+        guard permissionChecker.snapshot().accessibility == .granted else {
+            throw AccessibilityError.permissionDenied
+        }
+        let current = try mapWindow(window)
+        guard CFEqual(binding.element, current) else { throw AccessibilityError.windowNotFound }
+    }
+
+    /// Revalidates the concrete AX window retained for a live grant. Public
+    /// window metadata is not sufficient here because WindowServer may reuse a
+    /// numeric window ID after a close/recreate cycle.
+    public func validateWindowBinding(
+        sessionID: UUID,
+        window: WindowDescriptor
+    ) throws {
+        guard permissionChecker.snapshot().accessibility == .granted else {
+            throw AccessibilityError.permissionDenied
+        }
+        guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
+        guard session.window.identity == window.identity else { throw AccessibilityError.windowNotFound }
+        let current = try mapWindow(window)
+        guard CFEqual(session.windowElement.element, current) else {
+            throw AccessibilityError.windowNotFound
+        }
+    }
+
+    public func openWindowSession(
+        sessionID: UUID,
+        binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {
+        try validateWindowBinding(binding, window: window)
+        sessions[sessionID] = AccessibilitySession(
+            window: window,
+            windowElement: AXElementBox(binding.element),
+            revision: 0,
+            elements: [:]
+        )
+    }
+
+    /// Refreshes the frame-bound window identity without exposing an AX tree.
+    /// Previous element IDs are discarded so an accessibility-free state call
+    /// cannot leave older nodes actionable.
+    public func refreshWindowBinding(
+        sessionID: UUID,
+        window: WindowDescriptor
+    ) throws -> UInt64 {
+        guard permissionChecker.snapshot().accessibility == .granted else {
+            throw AccessibilityError.permissionDenied
+        }
+        let current = try mapWindow(window)
+        if let prior = sessions[sessionID] {
+            guard prior.window.identity == window.identity,
+                  CFEqual(prior.windowElement.element, current) else {
+                throw AccessibilityError.windowNotFound
+            }
+            let revision = prior.revision + 1
+            sessions[sessionID] = AccessibilitySession(
+                window: window,
+                windowElement: prior.windowElement,
+                revision: revision,
+                elements: [:]
+            )
+            return revision
+        }
+        sessions[sessionID] = AccessibilitySession(
+            window: window,
+            windowElement: AXElementBox(current),
+            revision: 1,
+            elements: [:]
+        )
+        return 1
+    }
+
+    public func validateFocusedWindow(sessionID: UUID, revision: UInt64) throws {
+        guard let session = sessions[sessionID] else { throw AccessibilityError.sessionNotFound }
+        guard session.revision == revision else { throw AccessibilityError.staleRevision }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == session.window.identity.processID,
+              frontmost.bundleIdentifier == session.window.identity.bundleIdentifier else {
+            throw AccessibilityError.focusMismatch
+        }
+        let application = AXUIElementCreateApplication(session.window.identity.processID)
+        guard let focused = AXHelpers.copyAttribute(application, kAXFocusedWindowAttribute),
+              CFGetTypeID(focused) == AXUIElementGetTypeID(),
+              CFEqual(focused, session.windowElement.element) else {
+            throw AccessibilityError.focusMismatch
+        }
+    }
+
     public func describeActionTarget(
         sessionID: UUID,
         revision: UInt64,
@@ -344,7 +581,13 @@ public actor AccessibilityController {
                 guard let position = AXHelpers.pointAttribute(element, kAXPositionAttribute),
                       let size = AXHelpers.sizeAttribute(element, kAXSizeAttribute) else { return nil }
                 return Rect(CGRect(origin: position, size: size))
-            }()
+            }(),
+            subrole: AXHelpers.stringAttribute(element, kAXSubroleAttribute),
+            title: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXTitleAttribute)),
+            identifier: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXIdentifierAttribute)),
+            help: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXHelpAttribute)),
+            placeholder: secure ? nil : AXHelpers.limited(AXHelpers.stringAttribute(element, kAXPlaceholderValueAttribute)),
+            semanticContext: secure ? [] : AXHelpers.semanticAncestry(element)
         )
     }
 
@@ -529,6 +772,51 @@ enum AXHelpers {
         // A pathological ancestry cycle or excessive depth is ambiguous; fail
         // closed rather than inspecting or mutating potentially protected data.
         return true
+    }
+
+    /// Collects bounded, non-value ancestor metadata so generic controls such
+    /// as "Confirm" can inherit semantic context from a containing payment,
+    /// upload or medical sheet. AXValue and selection attributes are never
+    /// queried here.
+    static func semanticAncestry(
+        _ element: AXUIElement,
+        maximumDepth: Int = 8,
+        maximumCharacters: Int = 4_096
+    ) -> [String] {
+        guard !isSecure(element) else { return [] }
+        var context: [String] = []
+        var retainedCharacters = 0
+        var current: AXUIElement? = {
+            guard let parent = copyAttribute(element, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+            return unsafeBitCast(parent, to: AXUIElement.self)
+        }()
+        for _ in 0..<maximumDepth {
+            guard let candidate = current else { break }
+            let role = stringAttribute(candidate, kAXRoleAttribute) ?? "AXUnknown"
+            let metadata = [
+                stringAttribute(candidate, kAXTitleAttribute),
+                stringAttribute(candidate, kAXDescriptionAttribute),
+                stringAttribute(candidate, kAXIdentifierAttribute),
+                stringAttribute(candidate, kAXHelpAttribute),
+                stringAttribute(candidate, kAXPlaceholderValueAttribute),
+            ]
+                .compactMap { limited($0, maximum: 512)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !metadata.isEmpty {
+                let entry = "\(role): \(metadata.joined(separator: " "))"
+                let remaining = maximumCharacters - retainedCharacters
+                guard remaining > 0, let bounded = limited(entry, maximum: remaining) else { break }
+                if !context.contains(bounded) {
+                    context.append(bounded)
+                    retainedCharacters += bounded.utf16.count
+                }
+            }
+            guard let parent = copyAttribute(candidate, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            current = unsafeBitCast(parent, to: AXUIElement.self)
+        }
+        return context
     }
 
     static func displayValue(_ element: AXUIElement) -> String? {

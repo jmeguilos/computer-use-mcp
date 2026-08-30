@@ -6,6 +6,10 @@ import Testing
 
 private enum FixtureFailure: Error { case expected; case unexpected }
 
+private struct DisabledHostControlPolicyFixture: HostControlPolicyChecking {
+    func isAppControlEnabled() async -> Bool { false }
+}
+
 private func temporaryDirectory(mode: mode_t = S_IRWXU) throws -> URL {
     let base = FileManager.default.temporaryDirectory
         .appendingPathComponent("computer-use-mcp-tests-\(UUID().uuidString)", isDirectory: true)
@@ -70,6 +74,22 @@ private func makeWindow(
     )
 }
 
+private func accessRequestParameters(bundleIdentifier: String) -> JSONValue {
+    .object([
+        "target": .object([
+            "kind": .string("window"),
+            "app": .object([
+                "kind": .string("bundle_id"),
+                "value": .string(bundleIdentifier),
+            ]),
+            "launchIfNeeded": .bool(false),
+        ]),
+        "reason": .string("Inspect the fixture"),
+        "capabilities": .array([.string("observe")]),
+        "timeoutMs": .number(5_000),
+    ])
+}
+
 @Suite("Wire and connection contracts")
 struct WireAndConnectionTests {
     @Test func codecRejectsUnknownFieldsAndOversizeFrames() throws {
@@ -82,9 +102,9 @@ struct WireAndConnectionTests {
     }
 
     @Test func protocolCompatibilityIsDirectional() {
-        #expect(ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 1, minor: 0)))
-        #expect(!ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 1, minor: 1)))
-        #expect(!ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 2, minor: 0)))
+        #expect(ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 2, minor: 0)))
+        #expect(!ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 2, minor: 1)))
+        #expect(!ProtocolVersion.current.isCompatible(with: ProtocolVersion(major: 1, minor: 0)))
     }
 
     @Test func interactiveAccessGetsHumanDeadlineWithoutExpandingActionDeadline() {
@@ -131,6 +151,158 @@ struct WireAndConnectionTests {
             )
             Issue.record("unnegotiated capability was accepted")
         } catch { #expect(error as? ConnectionValidationError == .capabilityDenied) }
+    }
+
+    @Test func bridgeDerivesBoundedRequesterIdentityAndHarnessAuthority() async throws {
+        let harness = HarnessProcessIdentity(
+            name: "  Fixture\u{0007} Harness  ",
+            processID: 4_242,
+            bundleIdentifier: "com.example.fixture-harness",
+            signingIdentity: "fixture-signing",
+            processStartTimeUnixMs: 1_700_000_000_000
+        )
+        let peer = BridgeClientIdentityPolicy.makePeer(
+            harness: harness,
+            bridgeUID: 501,
+            bridgeProcessID: 7_777,
+            bridgeInstanceID: "bridge-instance"
+        )
+        #expect(peer.name == "Fixture Harness")
+        #expect(peer.processID == 7_777)
+        #expect(peer.instanceID == "bridge-instance")
+        #expect(peer.harnessIdentityVerified)
+
+        let window = try WindowIdentity(
+            windowID: 99,
+            processID: harness.processID,
+            bundleIdentifier: harness.bundleIdentifier,
+            ownerName: "Fixture Harness",
+            signingIdentity: harness.signingIdentity,
+            processStartTimeUnixMs: harness.processStartTimeUnixMs
+        )
+        #expect(peer.matchesHarnessWindow(window))
+        #expect(peer.matchesHarnessApplication(bundleIdentifier: harness.bundleIdentifier))
+        #expect(peer.captureExclusion?.matches(window) == true)
+
+        let registry = ConnectionRegistry(
+            harnessIdentityValidator: ToggleHarnessIdentityValidatorFixture(isCurrent: true)
+        )
+        _ = try await registry.open(
+            peer: peer,
+            kernelUID: 501,
+            kernelPID: 7_777,
+            protocolVersion: .current,
+            requestedCapabilities: [.inventoryRead],
+            capabilityToken: String(repeating: "b", count: 43)
+        )
+    }
+
+    @Test func connectionRevokesWhenDerivedHarnessGenerationDisappears() async throws {
+        let validator = ToggleHarnessIdentityValidatorFixture(isCurrent: true)
+        let registry = ConnectionRegistry(harnessIdentityValidator: validator)
+        let peer = PeerIdentity(
+            uid: 501,
+            processID: 7_777,
+            name: "Verified Fixture",
+            instanceID: "bridge-instance",
+            harnessProcessID: 4_242,
+            harnessBundleIdentifier: "com.example.verified",
+            harnessSigningIdentity: "verified-signing",
+            harnessProcessStartTimeUnixMs: 1_700_000_000_000,
+            harnessIdentityVerified: true
+        )
+        let opened = try await registry.open(
+            peer: peer,
+            kernelUID: 501,
+            kernelPID: 7_777,
+            protocolVersion: .current,
+            requestedCapabilities: [.inventoryRead],
+            capabilityToken: String(repeating: "b", count: 43)
+        )
+        validator.setCurrent(false)
+        do {
+            _ = try await registry.touch(
+                connectionID: opened.id,
+                capabilityToken: opened.capabilityToken,
+                requiring: .inventoryRead
+            )
+            Issue.record("stale derived harness identity remained authorized")
+        } catch {
+            #expect(error as? ConnectionValidationError == .peerIdentityChanged)
+        }
+        #expect(await registry.record(connectionID: opened.id) == nil)
+    }
+
+    @Test func connectionRejectsUnverifiedHarnessClaimsAndFallsBackTruthfully() async throws {
+        let fallback = BridgeClientIdentityPolicy.makePeer(
+            harness: nil,
+            bridgeUID: 501,
+            bridgeProcessID: 7_777,
+            bridgeInstanceID: "bridge-instance"
+        )
+        #expect(fallback.name == "Unidentified local MCP harness")
+        #expect(!fallback.harnessIdentityVerified)
+        #expect(fallback.captureExclusion == nil)
+
+        let incoherent = PeerIdentity(
+            uid: 501,
+            processID: 7_777,
+            name: "spoofed",
+            instanceID: "instance",
+            harnessProcessID: 4_242,
+            harnessIdentityVerified: false
+        )
+        let registry = ConnectionRegistry()
+        do {
+            _ = try await registry.open(
+                peer: incoherent,
+                kernelUID: 501,
+                kernelPID: 7_777,
+                protocolVersion: .current,
+                requestedCapabilities: [.inventoryRead],
+                capabilityToken: String(repeating: "b", count: 43)
+            )
+            Issue.record("unverified harness identity fields were accepted")
+        } catch {
+            #expect(error as? ConnectionValidationError == .unauthenticated)
+        }
+    }
+
+    @Test func bridgeHelloIgnoresCallerSuppliedRequesterLabels() throws {
+        let root = URL(fileURLWithPath: "/tmp/computer-use-mcp-bridge-policy-test", isDirectory: true)
+        let configuration = SocketConfiguration(
+            runtimeDirectory: root,
+            socketURL: root.appendingPathComponent("host.sock"),
+            authenticationTokenURL: root.appendingPathComponent("auth.token")
+        )
+        let harness = HarnessProcessIdentity(
+            name: "Verified Fixture",
+            processID: 4_242,
+            bundleIdentifier: "com.example.verified",
+            signingIdentity: "verified-signing",
+            processStartTimeUnixMs: 1_700_000_000_000
+        )
+        let proxy = BridgeProxy(
+            configuration: configuration,
+            input: .nullDevice,
+            output: .nullDevice,
+            diagnostics: .nullDevice,
+            harnessIdentity: harness,
+            bridgeInstanceID: "bridge-owned-instance"
+        )
+        let incoming = Data(#"{"protocol":{"major":1,"minor":0},"id":"hello","method":"hello","client":{"name":"Spoofed Name","instanceId":"spoofed-instance","uid":1,"pid":123}}"#.utf8)
+        let transformed = try proxy.transform(
+            incoming,
+            authenticationToken: String(repeating: "a", count: 43),
+            first: true
+        )
+        let object = try #require(JSONSerialization.jsonObject(with: transformed) as? [String: Any])
+        let client = try #require(object["client"] as? [String: Any])
+        #expect(client["name"] as? String == "Verified Fixture")
+        #expect(client["instanceId"] as? String == "bridge-owned-instance")
+        #expect((client["pid"] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier)
+        #expect((client["harnessProcessID"] as? NSNumber)?.int32Value == harness.processID)
+        #expect(client["harnessIdentityVerified"] as? Bool == true)
     }
 
     @Test func handshakeReplayGuardRejectsNonceReuse() async throws {
@@ -219,6 +391,7 @@ struct RuntimeSecurityTests {
         #expect(CanonicalRuntime.socketEnvironmentKey == "COMPUTER_USE_MCP_SOCKET_PATH")
         #expect(configuration.socketURL.path.hasSuffix("ComputerUseMCP/runtime/host.sock"))
         #expect(CanonicalRuntime.bridgeBundleIdentifier == "com.jmeguilos.computer-use-mcp.bridge")
+        #expect(CanonicalRuntime.hostBundleIdentifier == "com.jmeguilos.computer-use-mcp.host")
     }
 
     @Test func existingWrongModeOverrideIsRejectedWithoutMutation() throws {
@@ -308,6 +481,76 @@ struct RuntimeSecurityTests {
         }
     }
 
+    @Test func bridgeAuthenticatesTheConnectedHostBeforeSendingFrames() throws {
+        let directory = URL(fileURLWithPath: "/tmp/computer-use-mcp-host-auth-test", isDirectory: true)
+        let configuration = SocketConfiguration(
+            runtimeDirectory: directory,
+            socketURL: directory.appendingPathComponent("host.sock"),
+            authenticationTokenURL: directory.appendingPathComponent("auth.token")
+        )
+        let peer = SocketPeerCredentials(
+            uid: UInt32(getuid()),
+            processID: 4_242,
+            auditToken: Data(repeating: 1, count: 32)
+        )
+        let accepted = BridgeProxy(
+            configuration: configuration,
+            input: .nullDevice,
+            output: .nullDevice,
+            diagnostics: .nullDevice,
+            harnessIdentity: nil,
+            bridgeInstanceID: "test",
+            serverPeerInspector: SocketPeerInspectorFixture(peer: peer),
+            serverPeerVerifier: AcceptingPeerVerifierFixture()
+        )
+        try accepted.authenticateServer(socket: -1)
+
+        let rejected = BridgeProxy(
+            configuration: configuration,
+            input: .nullDevice,
+            output: .nullDevice,
+            diagnostics: .nullDevice,
+            harnessIdentity: nil,
+            bridgeInstanceID: "test",
+            serverPeerInspector: SocketPeerInspectorFixture(peer: peer),
+            serverPeerVerifier: RejectingPeerVerifierFixture()
+        )
+        #expect(throws: LocalSecurityError.signatureRejected) {
+            try rejected.authenticateServer(socket: -1)
+        }
+
+        let wrongUID = BridgeProxy(
+            configuration: configuration,
+            input: .nullDevice,
+            output: .nullDevice,
+            diagnostics: .nullDevice,
+            harnessIdentity: nil,
+            bridgeInstanceID: "test",
+            serverPeerInspector: SocketPeerInspectorFixture(peer: SocketPeerCredentials(
+                uid: UInt32(getuid()) &+ 1,
+                processID: 4_242,
+                auditToken: Data(repeating: 1, count: 32)
+            )),
+            serverPeerVerifier: AcceptingPeerVerifierFixture()
+        )
+        #expect(throws: LocalSecurityError.peerCredentialUnavailable) {
+            try wrongUID.authenticateServer(socket: -1)
+        }
+    }
+
+    @Test func bridgePinsTheHostExecutableInsideTheSameAppBundle() {
+        let installedBridge = URL(fileURLWithPath: "/Users/fixture/ComputerUseMCPHost.app/Contents/Helpers/ComputerUseMCPBridge")
+        #expect(
+            BridgeHostPeerVerifierFactory.hostExecutableURL(forBridgeExecutable: installedBridge).path ==
+                "/Users/fixture/ComputerUseMCPHost.app/Contents/MacOS/ComputerUseMCPHost"
+        )
+        let buildBridge = URL(fileURLWithPath: "/tmp/build/ComputerUseMCPBridge")
+        #expect(
+            BridgeHostPeerVerifierFactory.hostExecutableURL(forBridgeExecutable: buildBridge).path ==
+                "/tmp/build/ComputerUseMCPHost"
+        )
+    }
+
     @Test func peerVerifierPolicySupportsPermissionRelaunchWithoutDowngradingReleases() {
         #expect(PeerVerifierPolicy.select(
             signingIdentity: .adHoc,
@@ -377,6 +620,50 @@ struct RuntimeSecurityTests {
 
 @Suite("Grant, frame, and transform authority")
 struct GrantFrameTransformTests {
+    @Test func globalAppControlGateIsFailClosedButStatusAndReleaseRemainAvailable() async throws {
+        let controller = HostController(controlPolicy: DisabledHostControlPolicyFixture())
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(), capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()), processID: 777,
+                name: "fixture-harness", instanceID: "fixture"
+            ),
+            capabilities: Set(HostCapability.allCases), openedAt: now,
+            lastActivityAt: now, idleTimeout: 900
+        )
+        let context = HostRequestContext(
+            requestID: "disabled-policy", connection: connection,
+            deadline: now.addingTimeInterval(30)
+        )
+
+        let status = try await controller.handle(
+            method: "status", params: .object([:]), context: context
+        )
+        #expect(status.objectValue?["status"] == .string("degraded"))
+        #expect(status.objectValue?["appControlEnabled"] == .bool(false))
+
+        do {
+            _ = try await controller.handle(
+                method: "listApps", params: .object([:]), context: context
+            )
+            Issue.record("disabled global app control exposed application inventory")
+        } catch {
+            #expect((error as? WireError)?.code == "APP_CONTROL_DISABLED")
+        }
+
+        let unknownGrant = UUID()
+        let release = try await controller.handle(
+            method: "releaseAccess",
+            params: .object([
+                "grantId": .string(unknownGrant.uuidString),
+                "timeoutMs": .number(10_000),
+            ]),
+            context: context
+        )
+        #expect(release.objectValue?["status"] == .string("not_found"))
+    }
+
     @Test func absentApplicationLaunchRequiresSeparateConsentBeforeMutation() async throws {
         let capture = EmptyCaptureServiceFixture()
         let presenter = LaunchDenyingPresenterFixture()
@@ -501,6 +788,10 @@ struct GrantFrameTransformTests {
             )
         )
         #expect(result.objectValue?["status"] == .string("granted"))
+        #expect(
+            result.objectValue?["target"]?.objectValue?["app"]?.objectValue?["bundlePath"] ==
+                .string("/Applications/Absent Fixture.app")
+        )
         #expect(launcher.launchCount == 1)
         #expect(await capture.inventoryCallCount() >= 3)
         guard let grantID = result.objectValue?["grantId"]?.stringValue else {
@@ -516,6 +807,143 @@ struct GrantFrameTransformTests {
             )
         )
         #expect(released.objectValue?["status"] == .string("released"))
+    }
+
+    @Test func canceledAccessRequestReachesTheVisiblePresenterAndPublishesNoGrant() async throws {
+        let app = ApplicationDescriptor(
+            bundleIdentifier: "com.example.fixture",
+            name: "Fixture",
+            processID: 777,
+            bundleURLPath: "/Applications/Fixture.app",
+            windows: [try makeWindow(bundle: "com.example.fixture", title: "Primary")],
+            isProtected: false
+        )
+        let presenter = CancellationObservingPresenterFixture()
+        let controller = HostController(
+            capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            permissions: GrantedPermissionFixture(),
+            accessPresenter: presenter
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(), capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            capabilities: Set(HostCapability.allCases), openedAt: now,
+            lastActivityAt: now, idleTimeout: 900
+        )
+        let task = Task {
+            try await controller.handle(
+                method: "requestAccess",
+                params: accessRequestParameters(bundleIdentifier: "com.example.fixture"),
+                context: HostRequestContext(
+                    requestID: "cancel-visible-picker",
+                    connection: connection,
+                    deadline: now.addingTimeInterval(5)
+                )
+            )
+        }
+        #expect(await presenter.waitUntilPresented())
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("canceled access request unexpectedly completed")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "CANCELLED")
+        }
+        #expect(await presenter.observedCancellation)
+        let status = try await controller.handle(
+            method: "status",
+            params: .object([:]),
+            context: HostRequestContext(
+                requestID: "status-after-picker-cancel",
+                connection: connection,
+                deadline: Date().addingTimeInterval(5)
+            )
+        )
+        #expect(status.objectValue?["activeGrants"] == .array([]))
+    }
+
+    @Test func disconnectCancelsVisibleAccessPresenterWithoutLateAuthority() async throws {
+        let app = ApplicationDescriptor(
+            bundleIdentifier: "com.example.fixture",
+            name: "Fixture",
+            processID: 777,
+            bundleURLPath: "/Applications/Fixture.app",
+            windows: [try makeWindow(bundle: "com.example.fixture", title: "Primary")],
+            isProtected: false
+        )
+        let presenter = CancellationObservingPresenterFixture()
+        let controller = HostController(
+            capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            permissions: GrantedPermissionFixture(),
+            accessPresenter: presenter
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(), capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            capabilities: Set(HostCapability.allCases), openedAt: now,
+            lastActivityAt: now, idleTimeout: 900
+        )
+        let task = Task {
+            try await controller.handle(
+                method: "requestAccess",
+                params: accessRequestParameters(bundleIdentifier: "com.example.fixture"),
+                context: HostRequestContext(
+                    requestID: "disconnect-visible-picker",
+                    connection: connection,
+                    deadline: now.addingTimeInterval(5)
+                )
+            )
+        }
+        #expect(await presenter.waitUntilPresented())
+        await controller.disconnect(connectionID: connection.id)
+        do {
+            _ = try await task.value
+            Issue.record("disconnected access request unexpectedly completed")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "CANCELLED")
+        }
+        #expect(await presenter.observedCancellation)
+    }
+
+    @Test func accessDeadlineCancelsAnUnansweredVisiblePresenter() async throws {
+        let app = ApplicationDescriptor(
+            bundleIdentifier: "com.example.fixture",
+            name: "Fixture",
+            processID: 777,
+            bundleURLPath: "/Applications/Fixture.app",
+            windows: [try makeWindow(bundle: "com.example.fixture", title: "Primary")],
+            isProtected: false
+        )
+        let presenter = CancellationObservingPresenterFixture()
+        let controller = HostController(
+            capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            permissions: GrantedPermissionFixture(),
+            accessPresenter: presenter
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(), capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(uid: UInt32(getuid()), processID: 777, name: "fixture-harness", instanceID: "fixture"),
+            capabilities: Set(HostCapability.allCases), openedAt: now,
+            lastActivityAt: now, idleTimeout: 900
+        )
+        do {
+            _ = try await controller.handle(
+                method: "requestAccess",
+                params: accessRequestParameters(bundleIdentifier: "com.example.fixture"),
+                context: HostRequestContext(
+                    requestID: "deadline-visible-picker",
+                    connection: connection,
+                    deadline: now.addingTimeInterval(0.15)
+                )
+            )
+            Issue.record("expired access picker unexpectedly completed")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "ACTION_TIMEOUT")
+        }
+        #expect(await presenter.observedCancellation)
     }
 
     @Test func failedMandatoryIndicatorNeverPublishesGrantAuthority() async throws {
@@ -666,6 +1094,154 @@ struct GrantFrameTransformTests {
         #expect(result.objectValue?["apps"] == .array([]))
     }
 
+    @Test func listAppsNeverMarksTheVerifiedRequestingHarnessGrantable() async throws {
+        let bundleIdentifier = "com.example.verified-harness"
+        let window = try makeWindow(
+            id: 7_101,
+            bundle: bundleIdentifier,
+            title: "Harness Window"
+        )
+        let application = ApplicationDescriptor(
+            bundleIdentifier: bundleIdentifier,
+            name: "Verified Harness",
+            processID: window.identity.processID,
+            windows: [window],
+            isProtected: false
+        )
+        let controller = HostController(
+            capture: ProgressiveCaptureServiceFixture(
+                application: application,
+                visibleAfterInventoryCall: 1
+            )
+        )
+        let now = Date()
+        func context(peer: PeerIdentity, requestID: String) -> HostRequestContext {
+            let connection = ConnectionRecord(
+                id: UUID(),
+                capabilityToken: String(repeating: "t", count: 43),
+                peer: peer,
+                capabilities: Set(HostCapability.allCases),
+                openedAt: now,
+                lastActivityAt: now,
+                idleTimeout: 900
+            )
+            return HostRequestContext(
+                requestID: requestID,
+                connection: connection,
+                deadline: now.addingTimeInterval(5)
+            )
+        }
+        func expected(grantable: Bool) -> JSONValue {
+            .object(["apps": .array([.object([
+                "bundleId": .string(bundleIdentifier),
+                "name": .string("Verified Harness"),
+                "isRunning": .bool(true),
+                "pid": .number(Double(window.identity.processID)),
+                "windowCount": .number(1),
+                "grantable": .bool(grantable),
+            ])])])
+        }
+
+        let verifiedPeer = PeerIdentity(
+            uid: UInt32(getuid()),
+            processID: 9_001,
+            name: "verified-harness",
+            instanceID: "verified-harness",
+            harnessProcessID: window.identity.processID,
+            harnessBundleIdentifier: bundleIdentifier,
+            harnessSigningIdentity: window.identity.signingIdentity,
+            harnessProcessStartTimeUnixMs: window.identity.processStartTimeUnixMs,
+            harnessIdentityVerified: true
+        )
+        let verifiedResult = try await controller.handle(
+            method: "listApps",
+            params: .object([:]),
+            context: context(peer: verifiedPeer, requestID: "verified-harness-inventory")
+        )
+        #expect(verifiedResult == expected(grantable: false))
+
+        let unverifiedResult = try await controller.handle(
+            method: "listApps",
+            params: .object([:]),
+            context: context(
+                peer: PeerIdentity(
+                    uid: UInt32(getuid()),
+                    processID: 9_002,
+                    name: "ordinary-client",
+                    instanceID: "ordinary-client"
+                ),
+                requestID: "ordinary-client-inventory"
+            )
+        )
+        #expect(unverifiedResult == expected(grantable: true))
+    }
+
+    @Test func listAppsRequiresAtLeastOneIndividuallyPolicyAllowedWindow() async throws {
+        let bundleIdentifier = "com.example.mixed-windows"
+        let protectedWindow = try makeWindow(
+            id: 7_201,
+            bundle: bundleIdentifier,
+            title: "Administrator Password Required"
+        )
+        let ordinaryWindow = try makeWindow(
+            id: 7_202,
+            bundle: bundleIdentifier,
+            title: "Ordinary Document"
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "t", count: 43),
+            peer: PeerIdentity(
+                uid: UInt32(getuid()),
+                processID: 9_003,
+                name: "ordinary-client",
+                instanceID: "ordinary-client"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        let context = HostRequestContext(
+            requestID: "window-policy-inventory",
+            connection: connection,
+            deadline: now.addingTimeInterval(5)
+        )
+
+        for (windows, expectedGrantable) in [
+            ([protectedWindow], false),
+            ([protectedWindow, ordinaryWindow], true),
+        ] {
+            let application = ApplicationDescriptor(
+                bundleIdentifier: bundleIdentifier,
+                name: "Mixed Windows",
+                processID: protectedWindow.identity.processID,
+                windows: windows,
+                isProtected: false
+            )
+            let controller = HostController(
+                capture: ProgressiveCaptureServiceFixture(
+                    application: application,
+                    visibleAfterInventoryCall: 1
+                )
+            )
+            let result = try await controller.handle(
+                method: "listApps",
+                params: .object([:]),
+                context: context
+            )
+            #expect(result == .object(["apps": .array([.object([
+                "bundleId": .string(bundleIdentifier),
+                "name": .string("Mixed Windows"),
+                "isRunning": .bool(true),
+                "pid": .number(Double(protectedWindow.identity.processID)),
+                "windowCount": .number(Double(windows.count)),
+                "grantable": .bool(expectedGrantable),
+            ])])]))
+        }
+    }
+
     @Test func displayGrantIsSessionOnlyAndSupportsInteraction() async throws {
         let display = try makeDisplay()
         let store = GrantStore(idleTimeout: 900)
@@ -767,16 +1343,19 @@ struct GrantFrameTransformTests {
             grantID: grant,
             connectionID: connection,
             transform: transform,
+            accessibilityRevision: 7,
             now: Date(timeIntervalSince1970: 100)
         )
         #expect(first.expiresAt == Date(timeIntervalSince1970: 160))
-        _ = try await store.validate(
+        #expect(first.accessibilityRevision == 7)
+        let validated = try await store.validate(
             frameID: first.frameID,
             grantID: grant,
             connectionID: connection,
             intent: "inspect field",
             now: Date(timeIntervalSince1970: 159)
         )
+        #expect(validated.accessibilityRevision == 7)
         _ = await store.create(
             grantID: grant,
             connectionID: connection,
@@ -818,6 +1397,54 @@ struct GrantFrameTransformTests {
 
 @Suite("Privacy, audit, and protected targets", .serialized)
 struct PrivacyAndPolicyTests {
+    @Test func windowCaptureIsReleasedOnlyAfterAnUnchangedUnprotectedPostcheck() throws {
+        let policy = ProtectedProcessPolicy()
+        let before = try makeWindow(title: "Ordinary document")
+        #expect(try WindowCaptureReleaseGate.release(
+            42,
+            before: before,
+            after: before,
+            expectedIdentity: before.identity,
+            protectedPolicy: policy
+        ) == 42)
+
+        let protected = try WindowDescriptor(
+            identity: before.identity,
+            title: "Administrator Password Required",
+            frame: before.frame,
+            layer: before.layer,
+            isOnScreen: before.isOnScreen,
+            isActive: before.isActive
+        )
+        #expect(throws: CaptureError.protectedTarget) {
+            try WindowCaptureReleaseGate.release(
+                42,
+                before: before,
+                after: protected,
+                expectedIdentity: before.identity,
+                protectedPolicy: policy
+            )
+        }
+
+        let moved = try WindowDescriptor(
+            identity: before.identity,
+            title: before.title,
+            frame: Rect(origin: Point(x: 121, y: 120), size: before.frame.size),
+            layer: before.layer,
+            isOnScreen: before.isOnScreen,
+            isActive: before.isActive
+        )
+        #expect(throws: CaptureError.targetIdentityChanged) {
+            try WindowCaptureReleaseGate.release(
+                42,
+                before: before,
+                after: moved,
+                expectedIdentity: before.identity,
+                protectedPolicy: policy
+            )
+        }
+    }
+
     @Test func displayCaptureAllowlistFreezesOnlyPrevalidatedIntersectingWindows() throws {
         func identity(_ windowID: UInt32, processID: Int32 = 9_000) throws -> WindowIdentity {
             try WindowIdentity(
@@ -1275,10 +1902,100 @@ struct PrivacyAndPolicyTests {
         #expect(decision == .protectedSurface)
         #expect(guarder.blockingProtectedOverlay(targetIndex: 1, stack: [protectedOverlay, target]))
     }
+
+    @Test func displayInputCannotTargetTheRequestingHarnessByPointOrFocus() throws {
+        let guarder = SyntheticDestinationGuard()
+        let display = try makeDisplay(
+            origin: Point(x: 0, y: 0),
+            logical: Size(width: 1_440, height: 900),
+            pixels: Size(width: 2_880, height: 1_800)
+        )
+        let exclusion = CaptureExcludedProcessIdentity(
+            processID: 5151,
+            bundleIdentifier: "com.example.fixture-harness",
+            signingIdentity: "fixture-signing",
+            processStartTimeUnixMs: 1_700_000_000_000
+        )
+        let harnessWindow = WindowStackEntry(
+            windowID: 5151,
+            processID: exclusion.processID,
+            bundleIdentifier: exclusion.bundleIdentifier,
+            processName: "Fixture Harness",
+            frame: Rect(origin: Point(x: 100, y: 100), size: Size(width: 600, height: 500)),
+            layer: 0,
+            alpha: 1
+        )
+        #expect(throws: SyntheticDestinationGuardError.selfControlBlocked) {
+            try guarder.validate(
+                scope: .display(display),
+                globalPoints: [Point(x: 200, y: 200)],
+                requireWholeTarget: false,
+                excludingProcess: exclusion,
+                stack: [harnessWindow]
+            )
+        }
+        #expect(throws: SyntheticDestinationGuardError.selfControlBlocked) {
+            try guarder.validateFocusedApplication(
+                processID: exclusion.processID,
+                bundleIdentifier: exclusion.bundleIdentifier,
+                excludingProcess: exclusion
+            )
+        }
+
+        let safeWindow = WindowStackEntry(
+            windowID: 6161,
+            processID: 6161,
+            bundleIdentifier: "com.example.safe",
+            processName: "Safe Fixture",
+            frame: harnessWindow.frame,
+            layer: 0,
+            alpha: 1
+        )
+        try guarder.validate(
+            scope: .display(display),
+            globalPoints: [Point(x: 200, y: 200)],
+            requireWholeTarget: false,
+            excludingProcess: exclusion,
+            stack: [safeWindow]
+        )
+    }
 }
 
 @Suite("Risk, cancellation, focus, and clipboard")
 struct InteractionSafetyTests {
+    @Test func emergencyRiskRevocationClearsPendingAndApprovedChallenges() async {
+        let store = RiskApprovalStore(challengeLifetime: 30)
+        let connection = UUID()
+        let approvedAuthorization = await store.authorize(
+            connectionID: connection,
+            requestID: "approved",
+            actionDigest: "digest-approved",
+            tier: .high
+        )
+        guard case .challenge(let approvedChallenge) = approvedAuthorization else {
+            Issue.record("high-risk fixture did not create a challenge")
+            return
+        }
+        #expect(await store.resolve(
+            challengeID: approvedChallenge.id,
+            connectionID: connection,
+            approved: true
+        ))
+        _ = await store.authorize(
+            connectionID: connection,
+            requestID: "pending",
+            actionDigest: "digest-pending",
+            tier: .medium
+        )
+        await store.revokeAll()
+        #expect((await store.pendingChallenges(connectionID: connection)).isEmpty)
+        #expect(!(await store.consumeApproved(
+            approvalRequestID: approvedChallenge.id,
+            connectionID: connection,
+            actionDigest: "digest-approved"
+        )))
+    }
+
     @Test func riskApprovalIsExactOneShotAndIntentCannotDowngradeClick() async throws {
         let store = RiskApprovalStore(challengeLifetime: 30)
         let connection = UUID()
@@ -1737,6 +2454,9 @@ struct PermissionAndErrorTests {
     }
 
     @Test func internalErrorsMapToStablePublicCodesWithoutDescriptions() {
+        #expect(WireErrorMapping.map(
+            WireError(code: "APP_CONTROL_DISABLED", message: "General app access is off")
+        ).code == "APP_CONTROL_DISABLED")
         #expect(WireErrorMapping.map(CaptureError.permissionDenied).code == "PERMISSION_REQUIRED")
         #expect(WireErrorMapping.map(AccessibilityError.staleRevision).code == "STALE_FRAME")
         #expect(WireErrorMapping.map(InputDriverError.canceled).code == "CANCELLED")
@@ -1808,6 +2528,36 @@ private struct AcceptingPeerVerifierFixture: PeerCodeVerifying {
     func verify(_ peer: SocketPeerCredentials) throws {}
 }
 
+private struct RejectingPeerVerifierFixture: PeerCodeVerifying {
+    func verify(_ peer: SocketPeerCredentials) throws {
+        throw LocalSecurityError.signatureRejected
+    }
+}
+
+private struct SocketPeerInspectorFixture: SocketPeerInspecting {
+    let peer: SocketPeerCredentials
+    func credentials(socket: Int32) throws -> SocketPeerCredentials { peer }
+}
+
+private final class ToggleHarnessIdentityValidatorFixture: HarnessIdentityValidating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Bool
+
+    init(isCurrent: Bool) { current = isCurrent }
+
+    func setCurrent(_ value: Bool) {
+        lock.lock()
+        current = value
+        lock.unlock()
+    }
+
+    func isCurrent(_ peer: PeerIdentity) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+}
+
 private struct EmptyCaptureServiceFixture: ScreenCaptureServing {
     func inventory() async throws -> InventorySnapshot {
         InventorySnapshot(applications: [], displays: [])
@@ -1823,7 +2573,8 @@ private struct EmptyCaptureServiceFixture: ScreenCaptureServing {
 
     func captureDisplay(
         displayID: UInt32,
-        policy: ScreenshotSizingPolicy
+        policy: ScreenshotSizingPolicy,
+        excludingProcess: CaptureExcludedProcessIdentity?
     ) async throws -> ScreenshotPayload {
         throw CaptureError.displayNotFound
     }
@@ -1857,7 +2608,8 @@ private actor ProgressiveCaptureServiceFixture: ScreenCaptureServing {
 
     func captureDisplay(
         displayID: UInt32,
-        policy: ScreenshotSizingPolicy
+        policy: ScreenshotSizingPolicy,
+        excludingProcess: CaptureExcludedProcessIdentity?
     ) async throws -> ScreenshotPayload { throw CaptureError.captureFailed }
 }
 
@@ -1891,19 +2643,61 @@ private final class RecordingApplicationLauncherFixture: ApplicationLaunching, @
 private final class LaunchDenyingPresenterFixture: AccessApprovalPresenting, @unchecked Sendable {
     var lastLaunchRequest: LaunchApprovalRequest?
 
-    func requestLaunchApproval(_ request: LaunchApprovalRequest) async -> Bool {
+    func requestLaunchApproval(
+        _ request: LaunchApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool {
         lastLaunchRequest = request
         return false
     }
 
-    func requestApproval(_ request: AccessApprovalRequest) async -> AccessApprovalDecision { .denied }
+    func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision { .denied }
 }
 
 private struct LaunchAcceptingPresenterFixture: AccessApprovalPresenting {
-    func requestLaunchApproval(_ request: LaunchApprovalRequest) async -> Bool { true }
+    func requestLaunchApproval(
+        _ request: LaunchApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> Bool { true }
 
-    func requestApproval(_ request: AccessApprovalRequest) async -> AccessApprovalDecision {
+    func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision {
         AccessApprovalDecision(selected: request.candidates.first, persistence: .allowOnce)
+    }
+}
+
+private actor CancellationObservingPresenterFixture: AccessApprovalPresenting {
+    private var presented = false
+    private(set) var observedCancellation = false
+
+    func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision {
+        presented = true
+        for _ in 0..<1_000 {
+            do {
+                try cancellation.check()
+            } catch {
+                observedCancellation = true
+                return .denied
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return .denied
+    }
+
+    func waitUntilPresented() async -> Bool {
+        for _ in 0..<200 {
+            if presented { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return presented
     }
 }
 

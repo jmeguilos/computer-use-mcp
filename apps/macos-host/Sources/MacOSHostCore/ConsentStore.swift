@@ -72,23 +72,27 @@ public actor PersistentAppConsentStore {
     public func record(window: WindowIdentity, capabilities: Set<PublicCapability>, now: Date = Date()) throws {
         let key = Self.key(window.bundleIdentifier, window.signingIdentity)
         let combined = records[key]?.capabilities.union(capabilities) ?? capabilities
-        records[key] = PersistentAppConsent(
+        var updated = records
+        updated[key] = PersistentAppConsent(
             bundleIdentifier: window.bundleIdentifier,
             signingIdentity: window.signingIdentity,
             capabilities: combined,
             updatedAt: now
         )
-        try persist()
+        try persist(updated)
+        records = updated
     }
 
     public func revoke(bundleIdentifier: String, signingIdentity: String) throws {
-        records.removeValue(forKey: Self.key(bundleIdentifier, signingIdentity))
-        try persist()
+        var updated = records
+        updated.removeValue(forKey: Self.key(bundleIdentifier, signingIdentity))
+        try persist(updated)
+        records = updated
     }
 
     public func revokeAll() throws {
+        try persist([:])
         records.removeAll()
-        try persist()
     }
 
     public func all() -> [PersistentAppConsent] {
@@ -98,8 +102,8 @@ public actor PersistentAppConsentStore {
         }
     }
 
-    private func persist() throws {
-        let data = try JSONEncoder.consent.encode(records.values.sorted { $0.bundleIdentifier < $1.bundleIdentifier })
+    private func persist(_ updated: [String: PersistentAppConsent]) throws {
+        let data = try JSONEncoder.consent.encode(updated.values.sorted { $0.bundleIdentifier < $1.bundleIdentifier })
         let parent = url.deletingLastPathComponent()
         var parentStatus = stat()
         guard lstat(parent.path, &parentStatus) == 0,

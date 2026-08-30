@@ -40,6 +40,7 @@ class ReadyBridge implements NativeBridge {
       status: "ready",
       nativeVersion: "0.1.0-alpha.1",
       platform: "macos",
+      appControlEnabled: true,
       permissions: { accessibility: "authorized", screenRecording: "authorized" },
       activeGrants: []
     };
@@ -507,5 +508,30 @@ describe("doctor and setup diagnostics", () => {
     expect(result.report.ready_for_control).toBe(true);
     expect(result.report.system.swift.ok).toBe(false);
     expect(JSON.stringify(result.report)).not.toContain(commandCanary);
+  });
+
+  it("rejects an installed Swift toolchain older than Swift 6", async () => {
+    const { dependencies } = createDependencies({ checkoutRoot: null });
+    const baseRunCommand = dependencies.runCommand!;
+    dependencies.runCommand = async (command, args, options) => {
+      if (command === "/usr/bin/swift") {
+        await baseRunCommand(command, args, options);
+        return successful("Apple Swift version 5.10.1\n");
+      }
+      return baseRunCommand(command, args, options);
+    };
+
+    const result = await collectDiagnostics("doctor", dependencies);
+    expect(result.exitCode).toBe(1);
+    expect(result.report.ready_for_control).toBe(true);
+    expect(result.report.system.swift).toEqual({
+      ok: false,
+      version: "Apple Swift version 5.10.1",
+      minimum_major: 6,
+      error: "Swift 6 or newer is required to build the native host."
+    });
+    expect(result.report.remediation).toContain(
+      "Install Xcode 16 or matching Command Line Tools with Swift 6 or newer."
+    );
   });
 });

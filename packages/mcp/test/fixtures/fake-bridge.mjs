@@ -2,19 +2,19 @@
 
 import readline from "node:readline";
 
-let connectionId = "connection-123456";
-let connectionToken = "connection-token-123456";
+let connectionId = "11111111-1111-4111-8111-111111111111";
+let connectionToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let hello = {};
 let cancelCount = 0;
 
 function response(id, result) {
-  process.stdout.write(`${JSON.stringify({ protocol: { major: 1, minor: 0 }, id, ok: true, result })}\n`);
+  process.stdout.write(`${JSON.stringify({ protocol: { major: 2, minor: 0 }, id, ok: true, result })}\n`);
 }
 
 function failure(id, code, message, retryable, details) {
   process.stdout.write(
     `${JSON.stringify({
-      protocol: { major: 1, minor: 0 },
+      protocol: { major: 2, minor: 0 },
       id,
       ok: false,
       error: { code, message, retryable, ...(details === undefined ? {} : { details }) }
@@ -61,6 +61,10 @@ lines.on("line", line => {
   if (request.method === "action" && request.params?.kind === "delay") return;
   if (request.method === "action" && request.params?.kind === "stale") {
     failure(request.id, "stale_frame", "refresh state", true);
+    return;
+  }
+  if (request.method === "action" && request.params?.kind === "app-control-disabled") {
+    failure(request.id, "APP_CONTROL_DISABLED", "General app access is off", false);
     return;
   }
   if (request.method === "action" && request.params?.kind === "risk") {

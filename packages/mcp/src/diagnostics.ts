@@ -28,12 +28,14 @@ const HOST_EXECUTABLE_NAME = "ComputerUseMCPHost";
 const BRIDGE_EXECUTABLE_NAME = "ComputerUseMCPBridge";
 const PACKAGE_NAME = "@jmeguilos/computer-use-mcp";
 const MINIMUM_MACOS_VERSION = "14.4";
+const MINIMUM_SWIFT_MAJOR = 6;
 
 const NativeStatusSchema = z
   .object({
     status: z.enum(["ready", "degraded", "permission_required", "unavailable"]),
     native_version: z.string().min(1).max(256),
     platform: z.literal("macos"),
+    app_control_enabled: z.boolean(),
     permissions: z
       .object({
         accessibility: z.enum(["authorized", "denied", "not_determined", "restricted"]),
@@ -165,7 +167,7 @@ export type DoctorReport = {
     macos: VersionCheck & { minimum: string };
     node: VersionCheck & { minimum_major: 20 };
     npm: VersionCheck;
-    swift: VersionCheck;
+    swift: VersionCheck & { minimum_major: 6 };
   };
   host: {
     ok: boolean;
@@ -323,7 +325,19 @@ export async function collectDiagnostics(
     ...(!macosResult.ok ? { error: commandError(macosResult) } : {})
   };
   const npmCheck = versionResult(npmResult, npmVersion);
-  const swiftCheck = versionResult(swiftResult, swiftVersion);
+  const swiftMajorMatch = swiftVersion?.match(/\bSwift version\s+(\d+)(?:\.|\b)/iu);
+  const swiftMajor = Number.parseInt(swiftMajorMatch?.[1] ?? "0", 10);
+  const swiftVersionSupported = Number.isInteger(swiftMajor) && swiftMajor >= MINIMUM_SWIFT_MAJOR;
+  const swiftCheck: VersionCheck & { minimum_major: 6 } = {
+    ok: swiftResult.ok && swiftVersion !== null && swiftVersionSupported,
+    version: swiftVersion,
+    minimum_major: MINIMUM_SWIFT_MAJOR,
+    ...(!swiftResult.ok
+      ? { error: commandError(swiftResult) }
+      : !swiftVersionSupported
+        ? { error: "Swift 6 or newer is required to build the native host." }
+        : {})
+  };
   const nodeMajor = Number.parseInt(nodeVersion.split(".")[0] ?? "0", 10);
   const nodeCheck: VersionCheck & { minimum_major: 20 } = {
     ok: Number.isInteger(nodeMajor) && nodeMajor >= 20,
@@ -570,13 +584,13 @@ export async function collectDiagnostics(
         );
 
   const nativePermissions = nativeHandshake.status?.permissions;
+  const appControlEnabled = nativeHandshake.status?.app_control_enabled === true;
   const tcc = {
     accessibility: nativePermissions?.accessibility ?? "unknown",
     screen_recording: nativePermissions?.screen_recording ?? "unknown",
     ready:
       nativePermissions?.accessibility === "authorized" &&
-      nativePermissions.screen_recording === "authorized" &&
-      nativeHandshake.status?.status === "ready"
+      nativePermissions.screen_recording === "authorized"
   };
 
   const system = {
@@ -619,7 +633,8 @@ export async function collectDiagnostics(
     runtimeOK &&
     processes.ok &&
     nativeHandshake.ok &&
-    tcc.ready;
+    tcc.ready &&
+    appControlEnabled;
 
   const checks: DoctorReport["checks"] = [
     { name: "platform", ok: system.platform.ok, detail: platform },
@@ -646,6 +661,11 @@ export async function collectDiagnostics(
       ok: nativeHandshake.ok,
       detail: nativeHandshake.ok ? `protocol ${nativeHandshake.protocol} accepted` : "failed"
     },
+    {
+      name: "app_control",
+      ok: appControlEnabled,
+      detail: appControlEnabled ? "enabled" : "disabled"
+    },
     ...(sourcePackVerifier === undefined
       ? []
       : [
@@ -661,6 +681,9 @@ export async function collectDiagnostics(
   if (nativeHandshake.ok && !tcc.ready) {
     warnings.push("The native host is reachable, but Screen Recording and Accessibility are not both authorized.");
   }
+  if (nativeHandshake.ok && !appControlEnabled) {
+    warnings.push("The native host is reachable, but General App Access is turned off.");
+  }
   if (mode === "doctor") {
     warnings.push("Doctor is read-only; it did not launch the host, alter TCC, or change runtime permissions.");
   }
@@ -675,6 +698,7 @@ export async function collectDiagnostics(
     processes,
     nativeHandshake,
     tccReady: tcc.ready,
+    appControlEnabled,
     ...(sourcePackVerifier === undefined ? {} : { packOK: sourcePackVerifier.ok })
   });
 
@@ -1328,6 +1352,7 @@ function buildRemediation(input: {
   processes: DoctorReport["processes"];
   nativeHandshake: NativeHandshakeReport;
   tccReady: boolean;
+  appControlEnabled: boolean;
   packOK?: boolean;
 }): string[] {
   const remediation = new Set<string>();
@@ -1338,7 +1363,7 @@ function buildRemediation(input: {
     remediation.add("Install Node.js 20 or newer with a working npm command.");
   }
   if (!input.system.swift.ok) {
-    remediation.add("Install Xcode 15.3 or matching Command Line Tools so /usr/bin/swift is available.");
+    remediation.add("Install Xcode 16 or matching Command Line Tools with Swift 6 or newer.");
   }
   if (!input.packageOK || input.packOK === false) {
     remediation.add("Rebuild from the locked source checkout and run npm run pack:verify.");
@@ -1357,6 +1382,9 @@ function buildRemediation(input: {
   }
   if (input.nativeHandshake.ok && !input.tccReady) {
     remediation.add("Use the host status menu and System Settings to resolve the reported native permission state, then relaunch if macOS requests that.");
+  }
+  if (input.nativeHandshake.ok && !input.appControlEnabled) {
+    remediation.add("Open Computer Control Settings from the host status menu and turn on General App Access when you are ready to accept access requests.");
   }
   return [...remediation];
 }

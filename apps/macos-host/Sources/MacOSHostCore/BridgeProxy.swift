@@ -1,24 +1,155 @@
+import AppKit
 import Darwin
 import Foundation
+
+public struct HarnessProcessIdentity: Equatable, Sendable {
+    public let name: String
+    public let processID: Int32
+    public let bundleIdentifier: String
+    public let signingIdentity: String
+    public let processStartTimeUnixMs: Int64
+
+    public init(
+        name: String,
+        processID: Int32,
+        bundleIdentifier: String,
+        signingIdentity: String,
+        processStartTimeUnixMs: Int64
+    ) {
+        self.name = name
+        self.processID = processID
+        self.bundleIdentifier = bundleIdentifier
+        self.signingIdentity = signingIdentity
+        self.processStartTimeUnixMs = processStartTimeUnixMs
+    }
+}
+
+enum BridgeClientIdentityPolicy {
+    static func makePeer(
+        harness: HarnessProcessIdentity?,
+        bridgeUID: UInt32,
+        bridgeProcessID: Int32,
+        bridgeInstanceID: String
+    ) -> PeerIdentity {
+        guard let harness else {
+            return PeerIdentity(
+                uid: bridgeUID,
+                processID: bridgeProcessID,
+                name: "Unidentified local MCP harness",
+                instanceID: bridgeInstanceID
+            )
+        }
+        return PeerIdentity(
+            uid: bridgeUID,
+            processID: bridgeProcessID,
+            name: sanitizedPresentationName(harness.name),
+            instanceID: bridgeInstanceID,
+            harnessProcessID: harness.processID,
+            harnessBundleIdentifier: harness.bundleIdentifier,
+            harnessSigningIdentity: harness.signingIdentity,
+            harnessProcessStartTimeUnixMs: harness.processStartTimeUnixMs,
+            harnessIdentityVerified: true
+        )
+    }
+
+    static func sanitizedPresentationName(_ name: String) -> String {
+        let normalized = name.unicodeScalars
+            .filter { !CharacterSet.controlCharacters.contains($0) }
+            .map(String.init)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return "Unidentified local MCP harness" }
+        return String(normalized.prefix(128))
+    }
+}
+
+enum HarnessProcessIdentityResolver {
+    static func resolve(startingAt processID: Int32 = getppid()) -> HarnessProcessIdentity? {
+        var current = processID
+        var visited = Set<Int32>()
+        for _ in 0..<32 {
+            guard current > 1, visited.insert(current).inserted else { break }
+            if let running = NSRunningApplication(processIdentifier: current),
+               running.activationPolicy != .prohibited,
+               let bundleIdentifier = running.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !bundleIdentifier.isEmpty,
+               let launchDate = running.launchDate,
+               let signingIdentity = ProcessCodeIdentity.designatedRequirementDigest(processID: current) {
+                return HarnessProcessIdentity(
+                    name: running.localizedName ?? bundleIdentifier,
+                    processID: current,
+                    bundleIdentifier: bundleIdentifier,
+                    signingIdentity: signingIdentity,
+                    processStartTimeUnixMs: Int64(launchDate.timeIntervalSince1970 * 1_000)
+                )
+            }
+            guard let parent = parentProcessID(of: current), parent != current else { break }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func parentProcessID(of processID: Int32) -> Int32? {
+        var information = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, processID]
+        guard sysctl(&mib, u_int(mib.count), &information, &size, nil, 0) == 0,
+              size >= MemoryLayout<kinfo_proc>.stride else { return nil }
+        return information.kp_eproc.e_ppid
+    }
+}
 
 public final class BridgeProxy: @unchecked Sendable {
     private let configuration: SocketConfiguration
     private let input: FileHandle
     private let output: FileHandle
     private let diagnostics: FileHandle
+    private let presentedPeer: PeerIdentity
+    private let serverPeerInspector: any SocketPeerInspecting
+    private let serverPeerVerifier: (any PeerCodeVerifying)?
     private let writeLock = NSLock()
     private var socketDescriptor: Int32 = -1
 
-    public init(
+    public convenience init(
         configuration: SocketConfiguration,
         input: FileHandle = .standardInput,
         output: FileHandle = .standardOutput,
         diagnostics: FileHandle = .standardError
     ) {
+        self.init(
+            configuration: configuration,
+            input: input,
+            output: output,
+            diagnostics: diagnostics,
+            harnessIdentity: HarnessProcessIdentityResolver.resolve(),
+            bridgeInstanceID: UUID().uuidString,
+            serverPeerInspector: DarwinSocketPeerInspector(),
+            serverPeerVerifier: nil
+        )
+    }
+
+    init(
+        configuration: SocketConfiguration,
+        input: FileHandle,
+        output: FileHandle,
+        diagnostics: FileHandle,
+        harnessIdentity: HarnessProcessIdentity?,
+        bridgeInstanceID: String,
+        serverPeerInspector: any SocketPeerInspecting = DarwinSocketPeerInspector(),
+        serverPeerVerifier: (any PeerCodeVerifying)? = nil
+    ) {
         self.configuration = configuration
         self.input = input
         self.output = output
         self.diagnostics = diagnostics
+        self.serverPeerInspector = serverPeerInspector
+        self.serverPeerVerifier = serverPeerVerifier
+        self.presentedPeer = BridgeClientIdentityPolicy.makePeer(
+            harness: harnessIdentity,
+            bridgeUID: UInt32(getuid()),
+            bridgeProcessID: ProcessInfo.processInfo.processIdentifier,
+            bridgeInstanceID: bridgeInstanceID
+        )
     }
 
     public func run() throws {
@@ -30,6 +161,7 @@ public final class BridgeProxy: @unchecked Sendable {
             Darwin.close(descriptor)
             socketDescriptor = -1
         }
+        try authenticateServer(socket: descriptor)
 
         let stdinReader = BoundedLineReader(fileHandle: input, maximumBytes: WireCodec.maximumLineBytes)
         guard let first = try stdinReader.nextLine() else { throw BridgeProxyError.helloRequired }
@@ -64,7 +196,19 @@ public final class BridgeProxy: @unchecked Sendable {
         }
     }
 
-    private func transform(_ data: Data, authenticationToken: String, first: Bool) throws -> Data {
+    func authenticateServer(socket: Int32) throws {
+        let peer = try serverPeerInspector.credentials(socket: socket)
+        guard peer.uid == UInt32(getuid()), peer.processID > 1,
+              !peer.auditToken.isEmpty else {
+            throw LocalSecurityError.peerCredentialUnavailable
+        }
+        let verifier = try serverPeerVerifier ?? BridgeHostPeerVerifierFactory.make(
+            configuration: configuration
+        )
+        try verifier.verify(peer)
+    }
+
+    func transform(_ data: Data, authenticationToken: String, first: Bool) throws -> Data {
         guard data.count <= WireCodec.maximumLineBytes else { throw BridgeProxyError.frameTooLarge }
         guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let method = object["method"] as? String,
@@ -74,14 +218,15 @@ public final class BridgeProxy: @unchecked Sendable {
         guard allowed.contains(method) else { throw BridgeProxyError.unsupportedMethod }
         if first {
             guard method == "hello" else { throw BridgeProxyError.helloRequired }
-            let incomingClient = object["client"] as? [String: Any] ?? [:]
             object["auth"] = ["token": authenticationToken]
-            object["client"] = [
-                "name": incomingClient["name"] as? String ?? "computer-use-mcp-server",
-                "instanceId": incomingClient["instanceId"] as? String ?? UUID().uuidString,
-                "uid": UInt32(getuid()),
-                "pid": ProcessInfo.processInfo.processIdentifier,
-            ]
+            let peerData = try JSONEncoder().encode(presentedPeer)
+            guard let peerObject = try JSONSerialization.jsonObject(with: peerData) as? [String: Any] else {
+                throw BridgeProxyError.malformedFrame
+            }
+            // Caller-provided names and instance IDs are untrusted display
+            // strings. The bridge derives the nearest verifiable GUI ancestor
+            // and creates its own per-process instance identifier.
+            object["client"] = peerObject
             object["nonce"] = try SecureTokenGenerator.generate()
             object.removeValue(forKey: "deadlineUnixMs")
         } else {

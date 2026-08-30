@@ -1,8 +1,8 @@
 export const PACKAGE_VERSION = "0.1.0-alpha.1" as const;
 
 /** Native helper/host protocol. Minor versions are backward-compatible. */
-export const PROTOCOL_VERSION = Object.freeze({ major: 1, minor: 0 }) as Readonly<{
-  major: 1;
+export const PROTOCOL_VERSION = Object.freeze({ major: 2, minor: 0 }) as Readonly<{
+  major: 2;
   minor: 0;
 }>;
 

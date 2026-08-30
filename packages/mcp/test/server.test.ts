@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -30,14 +31,60 @@ const grantId = "grant-123456";
 const frameId = "frame-123456";
 const approvalRequestId = "approval-request-123456";
 const timestamp = "2026-08-29T20:00:00.000Z";
+const fixtureBundlePath = realpathSync.native(".");
+const otherBundlePath = realpathSync.native("..");
 
 const windowTarget = {
   kind: "window",
-  app: { bundleId: "com.apple.TextEdit", name: "TextEdit", pid: 1234 },
+  app: {
+    bundleId: "com.apple.TextEdit",
+    name: "TextEdit",
+    pid: 1234,
+    bundlePath: fixtureBundlePath
+  },
   title: "Document",
   boundsPoints: { x: -100, y: 20, width: 800, height: 600 },
   displayId: "display-123456"
 };
+
+function windowAccessResult(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    status: "granted",
+    grantId,
+    target: windowTarget,
+    capabilities: ["observe", "interact"],
+    idleExpiresAt: "2099-01-01T00:00:00.000Z",
+    sessionOnly: false,
+    ...overrides
+  };
+}
+
+function displayAccessResult(
+  displayId = "display-123456",
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    status: "granted",
+    grantId,
+    target: {
+      kind: "display",
+      display: {
+        displayId,
+        name: "External",
+        isMain: false,
+        isMirrored: false,
+        framePoints: { x: -1920, y: 0, width: 1920, height: 1080 },
+        pixelWidth: 3840,
+        pixelHeight: 2160,
+        scaleFactor: 2
+      }
+    },
+    capabilities: ["observe", "interact"],
+    idleExpiresAt: "2099-01-01T00:00:00.000Z",
+    sessionOnly: true,
+    ...overrides
+  };
+}
 
 function makePng(width: number, height: number): Buffer {
   const png = Buffer.alloc(24);
@@ -99,6 +146,7 @@ class FakeBridge implements NativeBridge {
   public stateTarget: unknown = windowTarget;
   public accessibilityState: unknown = fullAccessibilityState;
   public omitAccessibility = false;
+  public accessResultOverride: unknown;
 
   public isConnected(): boolean {
     return !this.closed;
@@ -126,6 +174,7 @@ class FakeBridge implements NativeBridge {
         status: "ready",
         nativeVersion: "0.1.0-alpha.1",
         platform: "macos",
+        appControlEnabled: true,
         permissions: { accessibility: "authorized", screenRecording: "authorized" },
         activeGrants: []
       };
@@ -133,6 +182,7 @@ class FakeBridge implements NativeBridge {
     if (method === "listDisplays") return { displays: [] };
     if (method === "listApps") return { apps: [] };
     if (method === "requestAccess") {
+      if (this.accessResultOverride !== undefined) return this.accessResultOverride;
       const target = record.target as Record<string, unknown>;
       if (target.kind === "display") {
         return {
@@ -151,7 +201,7 @@ class FakeBridge implements NativeBridge {
               scaleFactor: 2
             }
           },
-          capabilities: ["observe", "interact"],
+          capabilities: record.capabilities,
           idleExpiresAt: "2099-01-01T00:00:00.000Z",
           sessionOnly: true
         };
@@ -160,7 +210,7 @@ class FakeBridge implements NativeBridge {
         status: "granted",
         grantId,
         target: windowTarget,
-        capabilities: ["observe", "interact"],
+        capabilities: record.capabilities,
         idleExpiresAt: "2099-01-01T00:00:00.000Z",
         sessionOnly: false
       };
@@ -685,6 +735,175 @@ describe("Computer Use MCP server", () => {
     expect(bridge.calls.filter(call => call.method === "action")).toHaveLength(1);
     expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(1);
     expect(bridge.calls.find(call => call.method === "approveRisk")?.params.approved).toBe(false);
+  });
+
+  it("accepts only an exact window grant for the requested app and capability set", async () => {
+    const bridge = new FakeBridge();
+    bridge.accessResultOverride = windowAccessResult({ capabilities: ["observe"] });
+    const { client } = await connectHarness({ bridge });
+    const result = await client.callTool({
+      name: "computer_request_access",
+      arguments: {
+        target: {
+          kind: "window",
+          app: { kind: "name", value: "textedit" },
+          launch_if_needed: false
+        },
+        reason: "Observe the selected document",
+        capabilities: ["observe"]
+      }
+    });
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      status: "granted",
+      session_only: false,
+      capabilities: ["observe"],
+      target: {
+        kind: "window",
+        app: { bundle_id: "com.apple.TextEdit", name: "TextEdit" }
+      }
+    });
+
+    const pathBridge = new FakeBridge();
+    pathBridge.accessResultOverride = windowAccessResult({ capabilities: ["observe"] });
+    const { client: pathClient } = await connectHarness({ bridge: pathBridge });
+    const pathResult = await pathClient.callTool({
+      name: "computer_request_access",
+      arguments: {
+        target: {
+          kind: "window",
+          app: { kind: "path", value: fixtureBundlePath },
+          launch_if_needed: false
+        },
+        reason: "Observe the app selected by its canonical path",
+        capabilities: ["observe"]
+      }
+    });
+    expect(pathResult.structuredContent).toMatchObject({
+      ok: true,
+      status: "granted",
+      target: { kind: "window", app: { bundle_path: fixtureBundlePath } }
+    });
+  });
+
+  it("rejects grants that are not exactly bound to the access request", async () => {
+    const windowRequest = {
+      kind: "window",
+      app: { kind: "bundle_id", value: "com.apple.TextEdit" },
+      launch_if_needed: false
+    } as const;
+    const cases: Array<{
+      name: string;
+      target: Record<string, unknown>;
+      capabilities: string[];
+      nativeResult: Record<string, unknown>;
+    }> = [
+      {
+        name: "target kind substitution",
+        target: windowRequest,
+        capabilities: ["observe", "interact"],
+        nativeResult: displayAccessResult("display-123456", { sessionOnly: false })
+      },
+      {
+        name: "display substitution",
+        target: { kind: "display", display_id: "display-123456" },
+        capabilities: ["observe", "interact"],
+        nativeResult: displayAccessResult("display-other")
+      },
+      {
+        name: "persistent window grant",
+        target: windowRequest,
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult({ sessionOnly: true })
+      },
+      {
+        name: "persistent display grant",
+        target: { kind: "display", display_id: "display-123456" },
+        capabilities: ["observe", "interact"],
+        nativeResult: displayAccessResult("display-123456", { sessionOnly: false })
+      },
+      {
+        name: "capability elevation",
+        target: windowRequest,
+        capabilities: ["observe"],
+        nativeResult: windowAccessResult({ capabilities: ["observe", "interact"] })
+      },
+      {
+        name: "capability omission",
+        target: windowRequest,
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult({ capabilities: ["observe"] })
+      },
+      {
+        name: "duplicate returned capabilities",
+        target: windowRequest,
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult({ capabilities: ["observe", "interact", "interact"] })
+      },
+      {
+        name: "bundle identifier substitution",
+        target: {
+          kind: "window",
+          app: { kind: "bundle_id", value: "com.example.Other" },
+          launch_if_needed: false
+        },
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult()
+      },
+      {
+        name: "application name substitution",
+        target: {
+          kind: "window",
+          app: { kind: "name", value: "Other" },
+          launch_if_needed: false
+        },
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult()
+      },
+      {
+        name: "application path substitution",
+        target: {
+          kind: "window",
+          app: { kind: "path", value: otherBundlePath },
+          launch_if_needed: false
+        },
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult()
+      },
+      {
+        name: "missing application path metadata",
+        target: {
+          kind: "window",
+          app: { kind: "path", value: fixtureBundlePath },
+          launch_if_needed: false
+        },
+        capabilities: ["observe", "interact"],
+        nativeResult: windowAccessResult({
+          target: {
+            ...windowTarget,
+            app: { bundleId: "com.apple.TextEdit", name: "TextEdit", pid: 1234 }
+          }
+        })
+      }
+    ];
+
+    for (const testCase of cases) {
+      const bridge = new FakeBridge();
+      bridge.accessResultOverride = testCase.nativeResult;
+      const { client } = await connectHarness({ bridge });
+      const result = await client.callTool({
+        name: "computer_request_access",
+        arguments: {
+          target: testCase.target,
+          reason: `Reject ${testCase.name}`,
+          capabilities: testCase.capabilities
+        }
+      });
+      expect(result.structuredContent, testCase.name).toMatchObject({
+        ok: false,
+        error: { code: "BRIDGE_PROTOCOL_ERROR" }
+      });
+    }
   });
 
   it("makes display grants session-only", async () => {

@@ -66,6 +66,12 @@ describe("BridgeProcessClient", () => {
         code: "STALE_FRAME",
         retryable: true
       });
+      await expect(
+        bridge.call("action", { kind: "app-control-disabled" })
+      ).rejects.toMatchObject({
+        code: "APP_CONTROL_DISABLED",
+        retryable: false
+      });
       const status = (await bridge.call("status", {})) as Record<string, unknown>;
       expect(status.cancelCount).toBe(1);
     } finally {
