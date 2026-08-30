@@ -759,6 +759,7 @@ struct GrantFrameTransformTests {
         let launcher = RecordingApplicationLauncherFixture()
         let controller = HostController(
             capture: capture,
+            accessibility: GrantingAccessibilityFixture(),
             permissions: GrantedPermissionFixture(),
             accessPresenter: presenter,
             applicationLauncher: launcher
@@ -821,6 +822,7 @@ struct GrantFrameTransformTests {
         let presenter = CancellationObservingPresenterFixture()
         let controller = HostController(
             capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            accessibility: GrantingAccessibilityFixture(),
             permissions: GrantedPermissionFixture(),
             accessPresenter: presenter
         )
@@ -875,6 +877,7 @@ struct GrantFrameTransformTests {
         let presenter = CancellationObservingPresenterFixture()
         let controller = HostController(
             capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            accessibility: GrantingAccessibilityFixture(),
             permissions: GrantedPermissionFixture(),
             accessPresenter: presenter
         )
@@ -919,6 +922,7 @@ struct GrantFrameTransformTests {
         let presenter = CancellationObservingPresenterFixture()
         let controller = HostController(
             capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            accessibility: GrantingAccessibilityFixture(),
             permissions: GrantedPermissionFixture(),
             accessPresenter: presenter
         )
@@ -956,6 +960,7 @@ struct GrantFrameTransformTests {
         )
         let controller = HostController(
             capture: ProgressiveCaptureServiceFixture(application: app, visibleAfterInventoryCall: 1),
+            accessibility: GrantingAccessibilityFixture(),
             permissions: GrantedPermissionFixture(),
             accessPresenter: LaunchAcceptingPresenterFixture(),
             indicator: FailingIndicatorFixture()
@@ -2706,6 +2711,86 @@ private struct FailingIndicatorFixture: ControlIndicatorPresenting {
     func hide(grantID: UUID) async {}
     func hide(connectionID: UUID) async {}
     func hideAll() async {}
+}
+
+private actor GrantingAccessibilityFixture: AccessibilityServing {
+    private var sessions: [UUID: WindowIdentity] = [:]
+
+    func createWindowBinding(window: WindowDescriptor) throws -> AccessibilityWindowBinding {
+        AccessibilityWindowBinding.fixtureToken()
+    }
+
+    func validateWindowBinding(
+        _ binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {}
+
+    func openWindowSession(
+        sessionID: UUID,
+        binding: AccessibilityWindowBinding,
+        window: WindowDescriptor
+    ) throws {
+        sessions[sessionID] = window.identity
+    }
+
+    func validateWindowBinding(sessionID: UUID, window: WindowDescriptor) throws {
+        guard sessions[sessionID] == window.identity else {
+            throw AccessibilityError.windowNotFound
+        }
+    }
+
+    func refreshWindowBinding(sessionID: UUID, window: WindowDescriptor) throws -> UInt64 {
+        try validateWindowBinding(sessionID: sessionID, window: window)
+        return 1
+    }
+
+    func state(
+        sessionID: UUID,
+        window: WindowDescriptor,
+        maximumNodes: Int,
+        maximumDepth: Int,
+        maximumCharacters: Int
+    ) throws -> AccessibilityState { throw AccessibilityError.operationFailed }
+
+    func perform(
+        sessionID: UUID,
+        revision: UInt64,
+        command: AccessibilityCommand,
+        cancellation: any InteractionCancellationChecking
+    ) throws { throw AccessibilityError.operationFailed }
+
+    func validateFocusedWindow(sessionID: UUID, revision: UInt64) throws {
+        throw AccessibilityError.operationFailed
+    }
+
+    func describeActionTarget(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int
+    ) throws -> AccessibilityActionDescriptor { throw AccessibilityError.operationFailed }
+
+    func describeFocusedActionTarget(
+        sessionID: UUID,
+        revision: UInt64
+    ) throws -> AccessibilityActionDescriptor { throw AccessibilityError.operationFailed }
+
+    func raise(
+        window: WindowDescriptor,
+        cancellation: any InteractionCancellationChecking
+    ) async throws { throw AccessibilityError.operationFailed }
+
+    func selectText(
+        sessionID: UUID,
+        revision: UInt64,
+        nodeID: Int,
+        text: String,
+        prefix: String?,
+        suffix: String?,
+        selectionType: String,
+        cancellation: any InteractionCancellationChecking
+    ) throws { throw AccessibilityError.operationFailed }
+
+    func close(sessionID: UUID) { sessions.removeValue(forKey: sessionID) }
 }
 
 private actor MaintenanceHandlerFixture: HostMethodHandling {

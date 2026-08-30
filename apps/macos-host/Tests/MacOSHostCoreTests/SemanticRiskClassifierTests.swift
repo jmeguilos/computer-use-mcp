@@ -199,10 +199,16 @@ struct SemanticRiskClassifierTests {
         ) == .medium)
         #expect(RiskClassifier.classify(
             kind: .typeText,
-            intent: "Enter postal code and pin the sidebar",
+            intent: "Enter postal code and keep the sidebar visible",
             key: nil,
             modifiers: []
         ) == .medium)
+        #expect(RiskClassifier.classify(
+            kind: .typeText,
+            intent: "Enter the account PIN",
+            key: nil,
+            modifiers: []
+        ) == .high)
     }
 
     @Test func approvalBindingDetectsSemanticControlChanges() {

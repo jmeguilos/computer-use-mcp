@@ -72,12 +72,16 @@ public actor PersistentAppConsentStore {
     public func record(window: WindowIdentity, capabilities: Set<PublicCapability>, now: Date = Date()) throws {
         let key = Self.key(window.bundleIdentifier, window.signingIdentity)
         let combined = records[key]?.capabilities.union(capabilities) ?? capabilities
+        // JSONEncoder's ISO-8601 strategy persists whole seconds. Keep the
+        // live policy byte-for-byte equivalent to a reopened store instead of
+        // retaining subsecond precision that the durable record cannot carry.
+        let persistedNow = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970))
         var updated = records
         updated[key] = PersistentAppConsent(
             bundleIdentifier: window.bundleIdentifier,
             signingIdentity: window.signingIdentity,
             capabilities: combined,
-            updatedAt: now
+            updatedAt: persistedNow
         )
         try persist(updated)
         records = updated
