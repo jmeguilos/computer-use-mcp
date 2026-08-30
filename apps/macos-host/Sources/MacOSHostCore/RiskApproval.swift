@@ -56,9 +56,29 @@ public enum RiskAuthorization: Equatable, Sendable {
     case denied(String)
 }
 
+public enum RiskApprovalDisposition: String, Equatable, Sendable {
+    case approved
+    case denied
+}
+
+public enum RiskApprovalResolutionResult: Equatable, Sendable {
+    case resolved(disposition: RiskApprovalDisposition, consumed: Bool)
+    case decisionMismatch
+    case unavailable
+}
+
+private struct RiskApprovalResolutionTombstone: Sendable {
+    let connectionID: UUID
+    let approved: Bool
+    let approvalMode: ApprovalMode
+    let expiresAt: Date
+    var consumed: Bool
+}
+
 public actor RiskApprovalStore {
     private var pending: [UUID: RiskChallenge] = [:]
     private var approved: [UUID: RiskChallenge] = [:]
+    private var resolutions: [UUID: RiskApprovalResolutionTombstone] = [:]
     private let challengeLifetime: TimeInterval
 
     public init(challengeLifetime: TimeInterval = 120) {
@@ -100,18 +120,37 @@ public actor RiskApprovalStore {
         approved: Bool,
         approvalMode: ApprovalMode = .elicitation,
         now: Date = Date()
-    ) -> Bool {
+    ) -> RiskApprovalResolutionResult {
         purgeExpired(now: now)
-        guard let challenge = pending.removeValue(forKey: challengeID),
+        if let resolution = resolutions[challengeID] {
+            guard resolution.connectionID == connectionID,
+                  resolution.approvalMode == approvalMode,
+                  resolution.expiresAt > now else {
+                return .unavailable
+            }
+            guard resolution.approved == approved else { return .decisionMismatch }
+            return .resolved(
+                disposition: approved ? .approved : .denied,
+                consumed: resolution.consumed
+            )
+        }
+
+        guard let challenge = pending[challengeID],
               challenge.connectionID == connectionID,
               challenge.approvalMode == approvalMode,
-              challenge.expiresAt > now else {
-            return false
-        }
+              challenge.expiresAt > now else { return .unavailable }
+        pending.removeValue(forKey: challengeID)
+        resolutions[challengeID] = RiskApprovalResolutionTombstone(
+            connectionID: challenge.connectionID,
+            approved: approved,
+            approvalMode: challenge.approvalMode,
+            expiresAt: challenge.expiresAt,
+            consumed: false
+        )
         if approved {
             self.approved[challenge.id] = challenge
         }
-        return true
+        return .resolved(disposition: approved ? .approved : .denied, consumed: false)
     }
 
     public func consumeApproved(
@@ -122,8 +161,12 @@ public actor RiskApprovalStore {
         now: Date = Date()
     ) -> Bool {
         purgeExpired(now: now)
-        guard let challenge = approved.removeValue(forKey: approvalRequestID),
-              challenge.connectionID == connectionID,
+        guard let challenge = approved.removeValue(forKey: approvalRequestID) else { return false }
+        if var resolution = resolutions[approvalRequestID] {
+            resolution.consumed = true
+            resolutions[approvalRequestID] = resolution
+        }
+        guard challenge.connectionID == connectionID,
               challenge.actionDigest == actionDigest,
               challenge.approvalMode == approvalMode,
               challenge.expiresAt > now else { return false }
@@ -133,11 +176,13 @@ public actor RiskApprovalStore {
     public func revoke(connectionID: UUID) {
         pending = pending.filter { $0.value.connectionID != connectionID }
         approved = approved.filter { $0.value.connectionID != connectionID }
+        resolutions = resolutions.filter { $0.value.connectionID != connectionID }
     }
 
     public func revokeAll() {
         pending.removeAll()
         approved.removeAll()
+        resolutions.removeAll()
     }
 
     public func pendingChallenges(connectionID: UUID, now: Date = Date()) -> [RiskChallenge] {
@@ -148,5 +193,6 @@ public actor RiskApprovalStore {
     private func purgeExpired(now: Date) {
         pending = pending.filter { $0.value.expiresAt > now }
         approved = approved.filter { $0.value.expiresAt > now }
+        resolutions = resolutions.filter { $0.value.expiresAt > now }
     }
 }

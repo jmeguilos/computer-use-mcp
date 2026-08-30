@@ -63,39 +63,97 @@ enum BridgeClientIdentityPolicy {
     }
 }
 
-enum HarnessProcessIdentityResolver {
-    static func resolve(startingAt processID: Int32 = getppid()) -> HarnessProcessIdentity? {
-        var current = processID
-        var visited = Set<Int32>()
-        for _ in 0..<32 {
-            guard current > 1, visited.insert(current).inserted else { break }
-            if let running = NSRunningApplication(processIdentifier: current),
-               running.activationPolicy != .prohibited,
-               let bundleIdentifier = running.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !bundleIdentifier.isEmpty,
-               let launchDate = running.launchDate,
-               let signingIdentity = ProcessCodeIdentity.designatedRequirementDigest(processID: current) {
-                return HarnessProcessIdentity(
-                    name: running.localizedName ?? bundleIdentifier,
-                    processID: current,
-                    bundleIdentifier: bundleIdentifier,
-                    signingIdentity: signingIdentity,
-                    processStartTimeUnixMs: Int64(launchDate.timeIntervalSince1970 * 1_000)
-                )
-            }
-            guard let parent = parentProcessID(of: current), parent != current else { break }
-            current = parent
+enum HarnessApplicationActivationPolicy: Equatable, Sendable {
+    case regular
+    case accessory
+    case prohibited
+}
+
+struct HarnessApplicationProcessSnapshot: Equatable, Sendable {
+    let name: String?
+    let bundleIdentifier: String?
+    let signingIdentity: String?
+    let processStartTimeUnixMs: Int64?
+    let activationPolicy: HarnessApplicationActivationPolicy
+}
+
+protocol HarnessProcessAncestryInspecting: Sendable {
+    func applicationSnapshot(processID: Int32) -> HarnessApplicationProcessSnapshot?
+    func parentProcessID(of processID: Int32) -> Int32?
+}
+
+struct LiveHarnessProcessAncestryInspector: HarnessProcessAncestryInspecting {
+    func applicationSnapshot(processID: Int32) -> HarnessApplicationProcessSnapshot? {
+        guard let running = NSRunningApplication(processIdentifier: processID) else { return nil }
+        let activationPolicy: HarnessApplicationActivationPolicy
+        switch running.activationPolicy {
+        case .regular: activationPolicy = .regular
+        case .accessory: activationPolicy = .accessory
+        case .prohibited: activationPolicy = .prohibited
+        @unknown default: activationPolicy = .prohibited
         }
-        return nil
+        return HarnessApplicationProcessSnapshot(
+            name: running.localizedName,
+            bundleIdentifier: running.bundleIdentifier,
+            signingIdentity: ProcessCodeIdentity.designatedRequirementDigest(processID: processID),
+            processStartTimeUnixMs: running.launchDate.map {
+                Int64($0.timeIntervalSince1970 * 1_000)
+            },
+            activationPolicy: activationPolicy
+        )
     }
 
-    private static func parentProcessID(of processID: Int32) -> Int32? {
+    func parentProcessID(of processID: Int32) -> Int32? {
         var information = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, processID]
         guard sysctl(&mib, u_int(mib.count), &information, &size, nil, 0) == 0,
               size >= MemoryLayout<kinfo_proc>.stride else { return nil }
         return information.kp_eproc.e_ppid
+    }
+}
+
+enum HarnessProcessIdentityResolver {
+    static let maximumDepth = 32
+
+    static func resolve(
+        startingAt processID: Int32 = getppid(),
+        inspector: any HarnessProcessAncestryInspecting = LiveHarnessProcessAncestryInspector()
+    ) -> HarnessProcessIdentity? {
+        var current = processID
+        var visited = Set<Int32>()
+        for _ in 0..<maximumDepth {
+            guard current > 1, visited.insert(current).inserted else { break }
+            // Accessory processes are frequently Electron/Chromium helpers
+            // whose bundle and PID do not own the harness's regular windows.
+            // Binding one would make main-app self-exclusion incomplete. V1
+            // therefore accepts only the nearest fully valid regular GUI app;
+            // an accessory-only ancestry remains unidentified and cannot gain
+            // target authority.
+            if let snapshot = inspector.applicationSnapshot(processID: current),
+               snapshot.activationPolicy == .regular {
+                // A nearer regular GUI process is the harness candidate even
+                // when one of its binding attributes is unavailable. Falling
+                // through to an outer launcher would exclude the wrong app
+                // and could permit control of the nearer GUI, so fail closed.
+                guard let bundleIdentifier = snapshot.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !bundleIdentifier.isEmpty,
+                      let signingIdentity = snapshot.signingIdentity?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !signingIdentity.isEmpty,
+                      let processStartTimeUnixMs = snapshot.processStartTimeUnixMs,
+                      processStartTimeUnixMs > 0 else { return nil }
+                return HarnessProcessIdentity(
+                    name: snapshot.name ?? bundleIdentifier,
+                    processID: current,
+                    bundleIdentifier: bundleIdentifier,
+                    signingIdentity: signingIdentity,
+                    processStartTimeUnixMs: processStartTimeUnixMs
+                )
+            }
+            guard let parent = inspector.parentProcessID(of: current), parent != current else { break }
+            current = parent
+        }
+        return nil
     }
 }
 

@@ -153,7 +153,14 @@ private struct GenerationCancellationScope: InteractionCancellationChecking {
 
 public protocol SyntheticInputDriving: Sendable {
     func click(globalPoint: Point, button: MouseButton, clickCount: Int, cancellation: InteractionCancellationChecking) throws
-    func drag(from: Point, to: Point, button: MouseButton, duration: TimeInterval, cancellation: InteractionCancellationChecking) throws
+    func drag(
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: TimeInterval,
+        cancellation: InteractionCancellationChecking,
+        validateDestination: @Sendable (Point) throws -> Void
+    ) throws
     func typeText(_ text: String, cancellation: InteractionCancellationChecking) throws
     func key(code: UInt16, flags: UInt64, cancellation: InteractionCancellationChecking) throws
     func scroll(deltaX: Int32, deltaY: Int32, at globalPoint: Point?, cancellation: InteractionCancellationChecking) throws
@@ -163,8 +170,21 @@ public extension SyntheticInputDriving {
     func click(globalPoint: Point, button: MouseButton, clickCount: Int) throws {
         try click(globalPoint: globalPoint, button: button, clickCount: clickCount, cancellation: NeverCanceled())
     }
-    func drag(from: Point, to: Point, button: MouseButton, duration: TimeInterval) throws {
-        try drag(from: from, to: to, button: button, duration: duration, cancellation: NeverCanceled())
+    func drag(
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: TimeInterval,
+        validateDestination: @Sendable (Point) throws -> Void
+    ) throws {
+        try drag(
+            from: from,
+            to: to,
+            button: button,
+            duration: duration,
+            cancellation: NeverCanceled(),
+            validateDestination: validateDestination
+        )
     }
     func typeText(_ text: String) throws { try typeText(text, cancellation: NeverCanceled()) }
     func key(code: UInt16, flags: UInt64) throws { try key(code: code, flags: flags, cancellation: NeverCanceled()) }
@@ -204,6 +224,58 @@ public enum DeterministicInputPlan {
     }
 }
 
+enum SyntheticDragEventKind: Equatable, Sendable {
+    case down
+    case move
+    case up
+}
+
+/// Executes an already-bounded drag plan with validation immediately before
+/// every event. The emitter seam keeps event ordering and failure cleanup
+/// deterministic in tests without posting input to the active desktop.
+enum DeterministicDragRunner {
+    static func run(
+        points: [Point],
+        duration: TimeInterval,
+        cancellation: InteractionCancellationChecking,
+        validateDestination: (Point) throws -> Void,
+        emit: (SyntheticDragEventKind, Point) throws -> Void
+    ) throws {
+        guard let first = points.first, let last = points.last else {
+            throw InputDriverError.invalidDuration
+        }
+        let interval = points.count > 1 ? duration / Double(points.count - 1) : 0
+
+        try cancellation.check()
+        try validateDestination(first)
+        try cancellation.check()
+        try emit(.down, first)
+
+        var currentPoint = first
+        do {
+            for point in points.dropFirst() {
+                try cancellation.check()
+                try validateDestination(point)
+                try cancellation.check()
+                try emit(.move, point)
+                currentPoint = point
+                if interval > 0 { Thread.sleep(forTimeInterval: interval) }
+            }
+
+            try cancellation.check()
+            try validateDestination(last)
+            try cancellation.check()
+            try emit(.up, last)
+        } catch {
+            // A live destination change or cancellation after mouse-down must
+            // not leave macOS in a drag. Cleanup deliberately bypasses the
+            // failed validator and is best-effort so the original error wins.
+            try? emit(.up, currentPoint)
+            throw error
+        }
+    }
+}
+
 public struct CGEventInputDriver: SyntheticInputDriving {
     private let permissionChecker: SystemPermissionChecking
 
@@ -236,43 +308,32 @@ public struct CGEventInputDriver: SyntheticInputDriving {
         to: Point,
         button: MouseButton = .left,
         duration: TimeInterval = 0.2,
-        cancellation: InteractionCancellationChecking
+        cancellation: InteractionCancellationChecking,
+        validateDestination: @Sendable (Point) throws -> Void
     ) throws {
         try requirePermission()
         let points = try DeterministicInputPlan.dragPoints(from: from, to: to, duration: duration)
         let types = mouseTypes(button)
-        try cancellation.check()
-        guard let down = CGEvent(mouseEventSource: nil, mouseType: types.down, mouseCursorPosition: from.cgPoint, mouseButton: button.cgButton) else {
-            throw InputDriverError.eventCreationFailed
-        }
-        down.post(tap: .cgSessionEventTap)
-        var currentPoint = from
-        do {
-            let interval = points.count > 1 ? duration / Double(points.count - 1) : 0
-            for point in points.dropFirst() {
-                try cancellation.check()
-                guard let moved = CGEvent(mouseEventSource: nil, mouseType: types.drag, mouseCursorPosition: point.cgPoint, mouseButton: button.cgButton) else {
-                    throw InputDriverError.eventCreationFailed
-                }
-                moved.post(tap: .cgSessionEventTap)
-                currentPoint = point
-                if interval > 0 { Thread.sleep(forTimeInterval: interval) }
+
+        try DeterministicDragRunner.run(
+            points: points,
+            duration: duration,
+            cancellation: cancellation,
+            validateDestination: validateDestination
+        ) { kind, point in
+            let eventType: CGEventType
+            switch kind {
+            case .down: eventType = types.down
+            case .move: eventType = types.drag
+            case .up: eventType = types.up
             }
-            try cancellation.check()
-            guard let up = CGEvent(mouseEventSource: nil, mouseType: types.up, mouseCursorPosition: to.cgPoint, mouseButton: button.cgButton) else {
-                throw InputDriverError.eventCreationFailed
-            }
-            up.post(tap: .cgSessionEventTap)
-        } catch {
-            // Once mouse-down has posted, cancellation and every failure path
-            // must best-effort balance it to avoid leaving macOS in a drag.
-            CGEvent(
+            guard let event = CGEvent(
                 mouseEventSource: nil,
-                mouseType: types.up,
-                mouseCursorPosition: currentPoint.cgPoint,
+                mouseType: eventType,
+                mouseCursorPosition: point.cgPoint,
                 mouseButton: button.cgButton
-            )?.post(tap: .cgSessionEventTap)
-            throw error
+            ) else { throw InputDriverError.eventCreationFailed }
+            event.post(tap: .cgSessionEventTap)
         }
     }
 

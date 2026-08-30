@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/client";
+import { Client, isInputRequiredResult } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { afterEach, describe, expect, it } from "vitest";
@@ -144,11 +144,23 @@ class FakeBridge implements NativeBridge {
   public nextError: Error | undefined;
   public nextApproveRiskError: Error | undefined;
   public nextApproveRiskDisposition: "approved" | "denied" | undefined;
+  public loseNextApproveRiskResponseAfterMutation = false;
   public closed = false;
   public stateTarget: unknown = windowTarget;
   public accessibilityState: unknown = fullAccessibilityState;
   public omitAccessibility = false;
   public accessResultOverride: unknown;
+  readonly #approvalResolutions = new Map<string, { approved: boolean; consumed: boolean }>();
+  #pendingApprovalRequestId: string | undefined;
+  #nextApprovalRequestNumber = 123456;
+
+  #pendingApproval(): string {
+    if (this.#pendingApprovalRequestId !== undefined) return this.#pendingApprovalRequestId;
+    const requestId = `approval-request-${this.#nextApprovalRequestNumber}`;
+    this.#nextApprovalRequestNumber += 1;
+    this.#pendingApprovalRequestId = requestId;
+    return requestId;
+  }
 
   public isConnected(): boolean {
     return !this.closed;
@@ -248,23 +260,57 @@ class FakeBridge implements NativeBridge {
       };
     }
     if (method === "approveRisk") {
+      const requestId = String(record.approvalRequestId);
+      const approved = record.approved === true;
+      const existing = this.#approvalResolutions.get(requestId);
+      if (existing !== undefined && existing.approved !== approved) {
+        throw new ComputerUseError("APPROVAL_MISMATCH", "Approval decision changed.");
+      }
+      if (existing === undefined && this.#pendingApprovalRequestId !== requestId) {
+        throw new ComputerUseError("APPROVAL_EXPIRED", "Approval is missing or expired.");
+      }
+      const resolution = existing ?? { approved, consumed: false };
+      if (existing === undefined) this.#pendingApprovalRequestId = undefined;
+      this.#approvalResolutions.set(requestId, resolution);
       const disposition = this.nextApproveRiskDisposition ??
-        (record.approved === true ? "approved" : "denied");
+        (resolution.approved ? "approved" : "denied");
       this.nextApproveRiskDisposition = undefined;
+      if (this.loseNextApproveRiskResponseAfterMutation) {
+        this.loseNextApproveRiskResponseAfterMutation = false;
+        throw new ComputerUseError("BRIDGE_UNAVAILABLE", "The approval response was lost.", {
+          retryable: true
+        });
+      }
       return {
-        approvalRequestId: String(record.approvalRequestId),
+        approvalRequestId: requestId,
         disposition,
-        consumed: false
+        consumed: resolution.consumed
       };
     }
     if (method === "action") {
       if (this.riskChallenge && record.approvalRequestId === undefined) {
+        const requestId = this.#pendingApproval();
+        if (record.approvalMode === "native") {
+          this.#pendingApprovalRequestId = undefined;
+          this.#approvalResolutions.set(requestId, {
+            approved: true,
+            consumed: false
+          });
+        }
         throw new NativeApprovalRequiredError("Confirm this exact action", {
-          approvalRequestId,
+          approvalRequestId: requestId,
           riskTier: "high",
           expiresAt: "2099-01-01T00:00:00.000Z",
           approvalMode: record.approvalMode as "elicitation" | "native"
         });
+      }
+      if (this.riskChallenge && record.approvalRequestId !== undefined) {
+        const requestId = String(record.approvalRequestId);
+        const resolution = this.#approvalResolutions.get(requestId);
+        if (resolution === undefined || !resolution.approved || resolution.consumed) {
+          throw new ComputerUseError("APPROVAL_USED", "Approval is unavailable or consumed.");
+        }
+        resolution.consumed = true;
       }
       return {
         status: "completed",
@@ -291,6 +337,7 @@ async function connectHarness(options: {
   bridge?: FakeBridge;
   confirm?: boolean;
   approvalMode?: "auto" | "native";
+  manualInputRequired?: boolean;
 } = {}): Promise<Harness> {
   const era = options.era ?? "legacy";
   const bridge = options.bridge ?? new FakeBridge();
@@ -300,7 +347,10 @@ async function connectHarness(options: {
       ? {
           capabilities: { elicitation: { form: {} } },
           versionNegotiation: { mode: { pin: "2026-07-28" } },
-          inputRequired: { maxRounds: 2 }
+          inputRequired: {
+            maxRounds: 2,
+            ...(options.manualInputRequired === true ? { autoFulfill: false } : {})
+          }
         }
       : undefined
   );
@@ -732,18 +782,71 @@ describe("Computer Use MCP server", () => {
       });
       expect(completed.structuredContent).toMatchObject({ ok: true, status: "completed" });
       expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(2);
-
-      const replay = await client.callTool({
-        name: "computer_click",
-        arguments: clickArguments()
-      });
-      expect(replay.structuredContent).toMatchObject({
-        ok: false,
-        error: { code: "APPROVAL_USED" }
-      });
-      expect(bridge.calls.filter(call => call.method === "approveRisk")).toHaveLength(2);
     }
   );
+
+  it("recovers an exact elicitation retry after the native decision mutates but its response is lost", async () => {
+    const bridge = new FakeBridge();
+    bridge.riskChallenge = true;
+    bridge.loseNextApproveRiskResponseAfterMutation = true;
+    const { client } = await connectHarness({
+      bridge,
+      era: "modern",
+      confirm: true,
+      manualInputRequired: true
+    });
+
+    const originalParams = {
+      name: "computer_click",
+      arguments: clickArguments()
+    };
+    const first = await client.callTool(originalParams, { allowInputRequired: true });
+    expect(isInputRequiredResult(first)).toBe(true);
+    if (!isInputRequiredResult(first) || first.requestState === undefined) {
+      throw new Error("Expected an input_required result with signed request state.");
+    }
+    expect(first.inputRequests).toHaveProperty("risk_approval");
+    const exactRetryParams = {
+      ...originalParams,
+      inputResponses: {
+        risk_approval: {
+          action: "accept" as const,
+          content: { confirm: true }
+        }
+      },
+      requestState: first.requestState
+    };
+
+    const lost = await client.callTool(exactRetryParams, { allowInputRequired: true });
+    expect(lost.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: "BRIDGE_UNAVAILABLE", retryable: true }
+    });
+
+    const completed = await client.callTool(exactRetryParams, { allowInputRequired: true });
+    expect(completed.structuredContent).toMatchObject({ ok: true, status: "completed" });
+    expect(
+      bridge.calls
+        .filter(call => call.method === "approveRisk")
+        .map(call => call.params.approvalRequestId)
+    ).toEqual([approvalRequestId, approvalRequestId]);
+    expect(
+      bridge.calls.filter(
+        call => call.method === "action" && call.params.approvalRequestId === approvalRequestId
+      )
+    ).toHaveLength(1);
+
+    const replay = await client.callTool(exactRetryParams, { allowInputRequired: true });
+    expect(replay.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: "APPROVAL_USED" }
+    });
+    expect(
+      bridge.calls.filter(
+        call => call.method === "action" && call.params.approvalRequestId === approvalRequestId
+      )
+    ).toHaveLength(1);
+  });
 
   it("rejects a mismatched native approval disposition without consuming local retry state", async () => {
     const bridge = new FakeBridge();

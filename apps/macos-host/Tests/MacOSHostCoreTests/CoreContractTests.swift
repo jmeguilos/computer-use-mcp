@@ -2115,7 +2115,7 @@ struct InteractionSafetyTests {
             challengeID: approvedChallenge.id,
             connectionID: connection,
             approved: true
-        ))
+        ) == .resolved(disposition: .approved, consumed: false))
         _ = await store.authorize(
             connectionID: connection,
             requestID: "pending",
@@ -2150,7 +2150,7 @@ struct InteractionSafetyTests {
             connectionID: connection,
             approved: true,
             now: Date(timeIntervalSince1970: 101)
-        ))
+        ) == .resolved(disposition: .approved, consumed: false))
         #expect(!(await store.consumeApproved(
             approvalRequestID: challenge.id,
             connectionID: connection,
@@ -2178,12 +2178,12 @@ struct InteractionSafetyTests {
             now: Date(timeIntervalSince1970: 200)
         )
         if case .challenge(let expired) = expiredAuthorization {
-            #expect(!(await store.resolve(
+            #expect(await store.resolve(
                 challengeID: expired.id,
                 connectionID: connection,
                 approved: true,
                 now: Date(timeIntervalSince1970: 231)
-            )))
+            ) == .unavailable)
         } else { Issue.record("expected expiring challenge") }
 
         let nativeAuthorization = await store.authorize(
@@ -2195,14 +2195,85 @@ struct InteractionSafetyTests {
             now: Date(timeIntervalSince1970: 300)
         )
         if case .challenge(let nativeChallenge) = nativeAuthorization {
-            #expect(!(await store.resolve(
+            #expect(await store.resolve(
                 challengeID: nativeChallenge.id,
                 connectionID: connection,
                 approved: true,
                 approvalMode: .elicitation,
                 now: Date(timeIntervalSince1970: 301)
-            )))
+            ) == .unavailable)
         } else { Issue.record("expected native-route challenge") }
+    }
+
+    @Test func riskResolutionRetryIsConcurrentIdempotentAndActionTokenStaysOneShot() async {
+        let store = RiskApprovalStore(challengeLifetime: 30)
+        let connection = UUID()
+        let authorization = await store.authorize(
+            connectionID: connection,
+            requestID: "response-loss",
+            actionDigest: "exact-digest",
+            tier: .high,
+            now: Date(timeIntervalSince1970: 100)
+        )
+        guard case .challenge(let challenge) = authorization else {
+            Issue.record("high-risk fixture did not create a challenge")
+            return
+        }
+
+        let results = await withTaskGroup(of: RiskApprovalResolutionResult.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await store.resolve(
+                        challengeID: challenge.id,
+                        connectionID: connection,
+                        approved: true,
+                        now: Date(timeIntervalSince1970: 101)
+                    )
+                }
+            }
+            var values: [RiskApprovalResolutionResult] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        #expect(results.count == 8)
+        #expect(results.allSatisfy {
+            $0 == .resolved(disposition: .approved, consumed: false)
+        })
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: connection,
+            approved: false,
+            now: Date(timeIntervalSince1970: 102)
+        ) == .decisionMismatch)
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: UUID(),
+            approved: true,
+            now: Date(timeIntervalSince1970: 102)
+        ) == .unavailable)
+
+        let consumptions = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await store.consumeApproved(
+                        approvalRequestID: challenge.id,
+                        connectionID: connection,
+                        actionDigest: "exact-digest",
+                        now: Date(timeIntervalSince1970: 103)
+                    )
+                }
+            }
+            var values: [Bool] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        #expect(consumptions.filter { $0 }.count == 1)
+        #expect(await store.resolve(
+            challengeID: challenge.id,
+            connectionID: connection,
+            approved: true,
+            now: Date(timeIntervalSince1970: 104)
+        ) == .resolved(disposition: .approved, consumed: true))
     }
 
     @Test func nativeActionBoundsRejectOverflowAndNegativeInputsBeforeDispatch() throws {
@@ -2347,6 +2418,39 @@ struct InteractionSafetyTests {
         #expect(fixture.items == originalItems)
         #expect(fixture.restoreCallCount == 1)
         #expect(fixture.restoredOwnedChangeCount == fixture.stagingFailureChangeCount)
+    }
+
+    @Test func clipboardExternalTakeoverBeforePasteNeverDispatchesOrRestores() throws {
+        let fixture = ExternalTakeoverPasteboardFixture()
+        let controller = ClipboardPasteController(pasteboard: fixture)
+        var operationRan = false
+
+        #expect(throws: InteractionSafetyError.clipboardChangedExternally) {
+            try controller.withTemporaryText("temporary secret") {
+                operationRan = true
+            }
+        }
+
+        #expect(!operationRan)
+        #expect(fixture.items == fixture.externalItems)
+        #expect(fixture.restoreCallCount == 0)
+    }
+
+    @Test func clipboardExternalTakeoverAfterSnapshotNeverStagesOrRestores() throws {
+        let fixture = SnapshotTakeoverPasteboardFixture()
+        let controller = ClipboardPasteController(pasteboard: fixture)
+        var operationRan = false
+
+        #expect(throws: InteractionSafetyError.clipboardChangedExternally) {
+            try controller.withTemporaryText("temporary secret") {
+                operationRan = true
+            }
+        }
+
+        #expect(!operationRan)
+        #expect(fixture.replaceCallCount == 0)
+        #expect(fixture.restoreCallCount == 0)
+        #expect(fixture.current == Data("external owner".utf8))
     }
 
     @Test func approvalSummaryNeverContainsTypedPayload() throws {
@@ -2696,10 +2800,79 @@ private final class FailingStagingPasteboardFixture: PasteboardAccessing, @unche
     }
 }
 
+private final class ExternalTakeoverPasteboardFixture: PasteboardAccessing, @unchecked Sendable {
+    private(set) var changeCount = 70
+    private(set) var items = [
+        PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data("original".utf8)]),
+    ]
+    let externalItems = [
+        PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data("external owner".utf8)]),
+    ]
+    private(set) var restoreCallCount = 0
+
+    func snapshot() -> PasteboardSnapshot {
+        PasteboardSnapshot(items: items, capturedChangeCount: changeCount)
+    }
+
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        changeCount += 1
+        let ownedChangeCount = changeCount
+        items = [PasteboardItemSnapshot(values: ["public.utf8-plain-text": Data(text.utf8)])]
+        // Simulate an external writer taking ownership after our write but
+        // before the controller's pre-dispatch ownership check.
+        changeCount += 1
+        items = externalItems
+        return .staged(ownedChangeCount: ownedChangeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
+        restoreCallCount += 1
+        return false
+    }
+}
+
+private final class SnapshotTakeoverPasteboardFixture: PasteboardAccessing, @unchecked Sendable {
+    private(set) var changeCount = 90
+    private(set) var current = Data("original".utf8)
+    private(set) var replaceCallCount = 0
+    private(set) var restoreCallCount = 0
+
+    func snapshot() -> PasteboardSnapshot {
+        let snapshot = PasteboardSnapshot(
+            items: [PasteboardItemSnapshot(values: ["public.utf8-plain-text": current])],
+            capturedChangeCount: changeCount
+        )
+        changeCount += 1
+        current = Data("external owner".utf8)
+        return snapshot
+    }
+
+    func replaceWithText(_ text: String) -> PasteboardTextStagingResult {
+        replaceCallCount += 1
+        return .staged(ownedChangeCount: changeCount)
+    }
+
+    func restore(_ snapshot: PasteboardSnapshot, ifOwnedChangeCount: Int) -> Bool {
+        restoreCallCount += 1
+        return false
+    }
+}
+
 private final class InputFixture: SyntheticInputDriving, @unchecked Sendable {
     var keys: [(UInt16, UInt64)] = []
     func click(globalPoint: Point, button: MouseButton, clickCount: Int, cancellation: InteractionCancellationChecking) throws {}
-    func drag(from: Point, to: Point, button: MouseButton, duration: TimeInterval, cancellation: InteractionCancellationChecking) throws {}
+    func drag(
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: TimeInterval,
+        cancellation: InteractionCancellationChecking,
+        validateDestination: @Sendable (Point) throws -> Void
+    ) throws {
+        try cancellation.check()
+        try validateDestination(from)
+        try validateDestination(to)
+    }
     func typeText(_ text: String, cancellation: InteractionCancellationChecking) throws {}
     func key(code: UInt16, flags: UInt64, cancellation: InteractionCancellationChecking) throws {
         try cancellation.check()
@@ -3156,6 +3329,32 @@ struct SecureValueWriteApprovalDispatchTests {
             context: context("approve-secure-write")
         )
         #expect(approval.objectValue?["disposition"] == .string("approved"))
+        #expect(approval.objectValue?["consumed"] == .bool(false))
+
+        // A lost response can be retried exactly without creating a second
+        // action token, while an opposite decision is rejected.
+        let repeatedApproval = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(challengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-secure-write-response-retry")
+        )
+        #expect(repeatedApproval == approval)
+        do {
+            _ = try await controller.handle(
+                method: "approveRisk",
+                params: .object([
+                    "approvalRequestId": .string(challengeID.uuidString),
+                    "approved": .bool(false),
+                ]),
+                context: context("approve-secure-write-opposite-decision")
+            )
+            Issue.record("an opposite decision reused the resolved approval")
+        } catch let error as WireError {
+            #expect(error.code == "APPROVAL_MISMATCH")
+        }
 
         let foreignConnection = ConnectionRecord(
             id: UUID(),
@@ -3233,6 +3432,16 @@ struct SecureValueWriteApprovalDispatchTests {
         #expect(await accessibility.performedCommands() == [
             .setValue(nodeID: 1, value: canary, authorization: .approvedDirectSecure),
         ])
+        let consumedApproval = try await controller.handle(
+            method: "approveRisk",
+            params: .object([
+                "approvalRequestId": .string(exactChallengeID.uuidString),
+                "approved": .bool(true),
+            ]),
+            context: context("approve-exact-secure-write-after-consumption")
+        )
+        #expect(consumedApproval.objectValue?["disposition"] == .string("approved"))
+        #expect(consumedApproval.objectValue?["consumed"] == .bool(true))
         do {
             _ = try await controller.handle(
                 method: "action",

@@ -78,7 +78,7 @@ const NativeApprovalResolutionSchema = z
   .object({
     approval_request_id: z.string().min(16).max(512),
     disposition: z.enum(["approved", "denied"]),
-    consumed: z.literal(false)
+    consumed: z.boolean()
   })
   .strict();
 
@@ -701,6 +701,9 @@ export class ComputerUseMcpRuntime {
         throw this.#protocolError("The native bridge returned the wrong approval disposition.");
       }
       this.#resolvedChallenges.set(approvalRequestId, Date.parse(expiresAt));
+      if (parsed.data.consumed) {
+        throw new ComputerUseError("APPROVAL_USED", "The native approval token was already consumed.");
+      }
     } finally {
       this.#resolvingChallenges.delete(approvalRequestId);
     }
