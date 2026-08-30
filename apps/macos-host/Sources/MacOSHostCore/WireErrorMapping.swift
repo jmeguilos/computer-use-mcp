@@ -22,7 +22,11 @@ public enum WireErrorMapping {
             case .windowNotFound, .windowMappingAmbiguous: return WireError(code: "WINDOW_CLOSED", message: "The exact granted window could not be resolved")
             case .staleRevision, .sessionNotFound: return WireError(code: "STALE_FRAME", message: "Refresh target state before retrying", retryable: true)
             case .elementNotFound, .textNotFound, .textAmbiguous: return WireError(code: "ELEMENT_NOT_FOUND", message: "The current-frame element was not found", retryable: true)
-            case .secureElement: return WireError(code: "ACCESS_DENIED", message: "Secure text elements cannot be read or selected")
+            case .secureElement:
+                return WireError(
+                    code: "ACCESS_DENIED",
+                    message: "Secure or protected content denies this operation; only an exact approved value write to a direct secure text field is allowed"
+                )
             default: return WireError(code: "ELEMENT_NOT_ACTIONABLE", message: "The element does not support that action")
             }
         }

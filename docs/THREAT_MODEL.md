@@ -107,7 +107,7 @@ against a compromised native host or operating system.
 | Remote attacker reaches the bridge | No network listener; Unix-domain socket only | A compromised MCP client can relay requests from elsewhere |
 | Target window contains prompt injection | Treat pixels/AX strings as untrusted data; no content can mint grants or approvals; visible native confirmation | The model may still follow malicious instructions inside content |
 | Screenshot or typed secret leaks through logs | Memory-only image cache; content excluded from audit; redacted digest/length metadata; mode-`0600` files | MCP clients/providers may store tool inputs and results |
-| Secure/password content is read or overwritten | Secure Accessibility fields redacted; protected targets denied; no clipboard read; explicit clipboard-write grant | Pixel capture may still show secrets the app itself renders visibly |
+| Secure/password content is read, selected, or changed without exact approval | Secure Accessibility fields stay redacted and unselectable; direct secure-text value writes require a consumed high-risk one-shot approval; protected content, secure descendants, and ambiguous ancestry stay denied; no clipboard read | Pixel capture may still show secrets the app itself renders visibly; explicitly approved write-only input reaches the target application |
 | User cannot stop control | Always-visible left-edge indicator; Stop revokes first; disconnect/idle/lock/exit revocation | A frozen WindowServer, invisible display, or compromised host may prevent UI response |
 | Indicator spoofs system consent or target state | Original project UI; non-system styling; bound to target and current grant state | Another app can draw a lookalike; users should verify the target and app identity |
 | Denial of service or event flood | Strict schemas and size caps; per-request deadlines; target serialization; bounded frame cache; cancel method | A permitted client can consume local CPU within configured limits |
@@ -119,10 +119,13 @@ against a compromised native host or operating system.
 
 The host denies known security-sensitive/system processes, every System Settings
 window, terminal-emulator identities and terminal-like bundle/process names,
-secure input fields, the lock/login screen, invalid offscreen targets, and
-surfaces that public APIs mark as protected. It does not downgrade to a private
-capture or input path after a denial. A denial is returned as structured data and
-recorded without sensitive content.
+the lock/login screen, invalid offscreen targets, protected content, secure
+descendants, and ambiguous secure surfaces. A direct secure text field remains
+write-only: its metadata and value are redacted, text selection and generic AX
+actions are denied, and `computer_set_value` can reach it only after an exact
+high-risk approval has been consumed. The host does not downgrade to a private
+capture or input path after a denial. A denial is returned as structured data
+and recorded without sensitive content.
 
 Full-display capture is a separate, explicit scope. It is session-only and does
 not authorize Accessibility access to every window. Clients should request it

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-minimum_test_count=44
+minimum_test_count=115
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "$script_directory/.." && pwd)"
 package_path="$repository_root/apps/macos-host"

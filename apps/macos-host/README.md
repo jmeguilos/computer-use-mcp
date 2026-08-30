@@ -71,7 +71,9 @@ accepts a resolved bundle identifier only; path selectors may target an
 already-running exact bundle path but are never executed by the host. Risk
 prompts show a short escaped payload preview only when a unique, frame-bound,
 non-secure Accessibility element is known; secure or ambiguous destinations show
-length and format only.
+length and format only. Direct secure text fields are write-only and require an
+exact high-risk approval; protected content, secure descendants, reads, and text
+selection remain denied.
 
 The source alpha host verifies incoming peers with same-user kernel credentials
 and private tokens but cannot enforce the Developer ID bridge-signing boundary;
