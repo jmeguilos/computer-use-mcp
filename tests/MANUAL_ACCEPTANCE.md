@@ -9,6 +9,24 @@ the deterministic two-window fixture and test data only. Do not weaken TCC,
 preseed a grant, auto-click native consent, or place secrets in screenshots,
 prompts, logs, or evidence.
 
+## Permission relaunch regression
+
+Before the client matrix, install the source candidate and exercise macOS's
+permission restart path:
+
+1. enable Screen Recording for `ComputerUseMCPHost` and choose macOS **Quit &
+   Reopen** when offered;
+2. confirm the relaunched process has no `--development-mode` argument and that
+   `doctor` still reaches the authenticated native handshake;
+3. enable Accessibility, relaunch if requested, and confirm `doctor` reports
+   both permissions granted; and
+4. in a separate non-sensitive test runtime, confirm a no-argument ad-hoc host
+   without the exact mode-`0600` source-development marker fails closed with
+   `developmentModeDisabled`.
+
+A Developer ID-signed build must select release peer verification whether the
+source marker is present or absent.
+
 ## Required clients
 
 Record the installed version and result for each current client:

@@ -8,7 +8,7 @@ For a local source build, run:
 ./Scripts/setup.sh
 ```
 
-That thin wrapper invokes the repository's canonical `scripts/setup-local.sh --adhoc-sign` flow. It builds an ad-hoc-signed app, installs it in the per-user Applications directory, creates the private source-development marker, launches onboarding, and does not download anything. Release builds should instead pass an explicit Developer ID identity to `Scripts/assemble-app.sh --codesign-identity ...` and complete the normal Apple notarization workflow outside this package.
+That thin wrapper invokes the repository's canonical `scripts/setup-local.sh --adhoc-sign` flow. It builds an ad-hoc-signed app, installs it in the per-user Applications directory, creates the private source-development marker, launches onboarding, and does not download anything. The marker also lets LaunchServices restart the installed source-development host after a macOS permission change without relying on command-line arguments. A Developer ID-signed host ignores the marker and requires its release signing policy. Release builds should pass an explicit Developer ID identity to `Scripts/assemble-app.sh --codesign-identity ...` and complete the normal Apple notarization workflow outside this package.
 
 Run the inspectable fixture as an actual app bundle (not a bare SwiftPM executable) with:
 

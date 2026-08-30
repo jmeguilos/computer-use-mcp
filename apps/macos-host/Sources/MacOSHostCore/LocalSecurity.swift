@@ -5,7 +5,6 @@ import Security
 
 public enum CanonicalRuntime {
     public static let socketEnvironmentKey = "COMPUTER_USE_MCP_SOCKET_PATH"
-    public static let developerModeEnvironmentKey = "COMPUTER_USE_MCP_DEV_MODE"
     public static let bridgeBundleIdentifier = "com.jmeguilos.computer-use-mcp.bridge"
 
     public static func directory(fileManager: FileManager = .default) throws -> URL {
@@ -115,6 +114,36 @@ public enum DevelopmentModeAuthorization {
         ),
               String(data: data, encoding: .utf8) == markerContents else { return false }
         return true
+    }
+}
+
+public enum CurrentCodeSigningIdentity: Equatable, Sendable {
+    case release(teamIdentifier: String)
+    case adHoc
+}
+
+public enum PeerVerifierMode: Equatable, Sendable {
+    case release(teamIdentifier: String)
+    case sourceDevelopment
+    case denied
+}
+
+/// A Developer ID identity always selects the release verifier. An ad-hoc
+/// source build may use the development verifier only while the setup-created,
+/// private authorization marker remains valid. The persistent marker is needed
+/// because LaunchServices does not preserve command-line arguments when macOS
+/// performs a permission-related Quit & Reopen.
+public enum PeerVerifierPolicy {
+    public static func select(
+        signingIdentity: CurrentCodeSigningIdentity,
+        sourceAuthorizationValid: Bool
+    ) -> PeerVerifierMode {
+        switch signingIdentity {
+        case let .release(teamIdentifier):
+            return .release(teamIdentifier: teamIdentifier)
+        case .adHoc:
+            return sourceAuthorizationValid ? .sourceDevelopment : .denied
+        }
     }
 }
 
@@ -336,10 +365,21 @@ public struct ReleasePeerCodeVerifier: PeerCodeVerifying {
 }
 
 public enum CurrentCodeIdentity {
-    public static func teamIdentifier() throws -> String {
+    // `kSecCodeSignatureAdhoc` is declared as 0x0002 in Security/CSCommon.h but
+    // is not imported into Swift by current macOS SDK overlays.
+    static let adHocSignatureFlag: UInt32 = 0x0002
+
+    public static func signingIdentity() throws -> CurrentCodeSigningIdentity {
         var code: SecCode?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code else {
             throw LocalSecurityError.signatureUnavailable
+        }
+        guard SecCodeCheckValidity(
+            code,
+            SecCSFlags(rawValue: kSecCSStrictValidate),
+            nil
+        ) == errSecSuccess else {
+            throw LocalSecurityError.signatureRejected
         }
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else {
@@ -348,11 +388,32 @@ public enum CurrentCodeIdentity {
         var information: CFDictionary?
         guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
               let dictionary = information as? [String: Any],
-              let team = dictionary[kSecCodeInfoTeamIdentifier as String] as? String,
-              !team.isEmpty else {
+              let flags = dictionary[kSecCodeInfoFlags as String] as? NSNumber else {
+            throw LocalSecurityError.signatureUnavailable
+        }
+        let teamIdentifier = dictionary[kSecCodeInfoTeamIdentifier as String] as? String
+        return try classify(
+            signingFlags: flags.uint32Value,
+            teamIdentifier: teamIdentifier
+        )
+    }
+
+    static func classify(
+        signingFlags: UInt32,
+        teamIdentifier: String?
+    ) throws -> CurrentCodeSigningIdentity {
+        let isAdHoc = signingFlags & adHocSignatureFlag != 0
+        let normalizedTeam = teamIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isAdHoc {
+            guard normalizedTeam?.isEmpty != false else {
+                throw LocalSecurityError.signatureRejected
+            }
+            return .adHoc
+        }
+        guard let normalizedTeam, !normalizedTeam.isEmpty else {
             throw LocalSecurityError.missingTeamIdentifier
         }
-        return team
+        return .release(teamIdentifier: normalizedTeam)
     }
 }
 

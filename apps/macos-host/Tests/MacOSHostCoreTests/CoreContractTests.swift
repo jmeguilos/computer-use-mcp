@@ -308,6 +308,48 @@ struct RuntimeSecurityTests {
         }
     }
 
+    @Test func peerVerifierPolicySupportsPermissionRelaunchWithoutDowngradingReleases() {
+        #expect(PeerVerifierPolicy.select(
+            signingIdentity: .adHoc,
+            sourceAuthorizationValid: true
+        ) == .sourceDevelopment)
+        #expect(PeerVerifierPolicy.select(
+            signingIdentity: .adHoc,
+            sourceAuthorizationValid: false
+        ) == .denied)
+        #expect(PeerVerifierPolicy.select(
+            signingIdentity: .release(teamIdentifier: "TEAM123456"),
+            sourceAuthorizationValid: true
+        ) == .release(teamIdentifier: "TEAM123456"))
+        #expect(PeerVerifierPolicy.select(
+            signingIdentity: .release(teamIdentifier: "TEAM123456"),
+            sourceAuthorizationValid: false
+        ) == .release(teamIdentifier: "TEAM123456"))
+    }
+
+    @Test func signingIdentityClassificationFailsClosed() throws {
+        #expect(try CurrentCodeIdentity.classify(
+            signingFlags: CurrentCodeIdentity.adHocSignatureFlag,
+            teamIdentifier: nil
+        ) == .adHoc)
+        #expect(try CurrentCodeIdentity.classify(
+            signingFlags: 0,
+            teamIdentifier: " TEAM123456 "
+        ) == .release(teamIdentifier: "TEAM123456"))
+        #expect(throws: LocalSecurityError.signatureRejected) {
+            try CurrentCodeIdentity.classify(
+                signingFlags: CurrentCodeIdentity.adHocSignatureFlag,
+                teamIdentifier: "TEAM123456"
+            )
+        }
+        #expect(throws: LocalSecurityError.missingTeamIdentifier) {
+            try CurrentCodeIdentity.classify(signingFlags: 0, teamIdentifier: nil)
+        }
+        #expect(throws: LocalSecurityError.missingTeamIdentifier) {
+            try CurrentCodeIdentity.classify(signingFlags: 0, teamIdentifier: " \n\t ")
+        }
+    }
+
     @Test func maintenanceRunsWhileListenerAcceptIsBlocked() async throws {
         // Darwin sockaddr_un paths are short. Hosted-runner TMPDIR values can
         // exceed that bound before the fixture even appends `host.sock`.

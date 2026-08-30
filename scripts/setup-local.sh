@@ -213,9 +213,11 @@ if [[ "$installed_bundle_id" != "$host_bundle_id" || \
 fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$destination"
 
-# Development peer verification is enabled only when both the caller requests
-# it and this fixed, per-user marker is present. A Developer ID-signed host
-# ignores the marker and always uses its release signing requirement.
+# Development peer verification is enabled only while this fixed, per-user
+# marker is present. Keeping that authorization in a private file lets the
+# ad-hoc app survive macOS permission-related Quit & Reopen relaunches, which do
+# not preserve command-line arguments. A Developer ID-signed host ignores the
+# marker and always uses its release signing requirement.
 runtime_directory="$user_home/Library/Application Support/ComputerUseMCP/runtime"
 if [[ -L "$user_home/Library/Application Support/ComputerUseMCP" || -L "$runtime_directory" ]]; then
   echo "Refusing a symlinked Computer Use MCP runtime path." >&2
@@ -250,7 +252,7 @@ echo "Installed development host at $destination" >&2
 echo "Created the explicit source-development authorization marker." >&2
 if [[ "$launch_onboarding" == true ]]; then
   echo "Launching permission onboarding; approve only the access you intend to use." >&2
-  /usr/bin/open "$destination" --args --development-mode --onboarding
+  /usr/bin/open "$destination" --args --onboarding
 else
-  echo "Launch skipped; open the app with --development-mode before running doctor." >&2
+  echo "Launch skipped; open the installed app before running doctor." >&2
 fi

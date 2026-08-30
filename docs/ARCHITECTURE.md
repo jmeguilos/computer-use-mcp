@@ -48,7 +48,10 @@ explicit development mode uses an ad-hoc signature and instead enforces the
 kernel-reported UID/PID, nonempty audit token, bootstrap token, authenticated
 hello, and connection capability. It does not enforce a designated signing
 requirement, so another process running as the same user is inside the
-development-mode trust boundary. Use source mode only with non-sensitive data.
+development-mode trust boundary. Setup records that explicit authorization in a
+mode-`0600`, same-user marker so macOS permission-related Quit & Reopen launches
+remain usable; a release-signed host always ignores that marker. Use source mode
+only with non-sensitive data.
 
 In a signed release, compromising the Node adapter is not sufficient to make an
 arbitrary same-user process a trusted socket peer. The adapter can still drive

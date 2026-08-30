@@ -46,15 +46,18 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate {
     private func startHost() throws {
         let configuration = try SocketConfiguration.resolved()
         let token = try RuntimeCredentialStore(configuration: configuration).prepare()
-        let developmentModeRequested = ProcessInfo.processInfo.arguments.contains("--development-mode") ||
-            ProcessInfo.processInfo.environment[CanonicalRuntime.developerModeEnvironmentKey] == "1"
         let verifier: PeerCodeVerifying
-        if let teamIdentifier = try? CurrentCodeIdentity.teamIdentifier() {
-            // A release-signed host never honors a command-line downgrade.
+        switch PeerVerifierPolicy.select(
+            signingIdentity: try CurrentCodeIdentity.signingIdentity(),
+            sourceAuthorizationValid: DevelopmentModeAuthorization.validate(configuration: configuration)
+        ) {
+        case let .release(teamIdentifier):
+            // A release-signed host always takes this branch and never honors
+            // the source-development authorization marker.
             verifier = try ReleasePeerCodeVerifier(teamIdentifier: teamIdentifier)
-        } else if developmentModeRequested && DevelopmentModeAuthorization.validate(configuration: configuration) {
+        case .sourceDevelopment:
             verifier = ExplicitDevelopmentPeerCodeVerifier(explicitlyEnabled: true)
-        } else {
+        case .denied:
             throw LocalSecurityError.developmentModeDisabled
         }
         let audit = try FileAuditStore(url: FileAuditStore.defaultURL())
