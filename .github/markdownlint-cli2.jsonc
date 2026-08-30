@@ -1,0 +1,9 @@
+{
+  "config": {
+    "default": true,
+    "MD013": false
+  },
+  "ignores": [
+    "packages/mcp/node_modules/**"
+  ]
+}

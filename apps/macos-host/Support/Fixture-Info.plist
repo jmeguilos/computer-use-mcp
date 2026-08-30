@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Computer Use MCP Fixture</string>
+    <key>CFBundleExecutable</key>
+    <string>computer-use-mcp-fixture</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jmeguilos.computer-use-mcp.fixture</string>
+    <key>CFBundleName</key>
+    <string>Computer Use MCP Fixture</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>ComputerUseMCPReleaseVersion</key>
+    <string>0.1.0-alpha.1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+</dict>
+</plist>

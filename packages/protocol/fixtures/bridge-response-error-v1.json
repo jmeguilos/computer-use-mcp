@@ -1,0 +1,16 @@
+{
+  "protocol": { "major": 1, "minor": 0 },
+  "id": "request-action-0001",
+  "ok": false,
+  "error": {
+    "code": "approval_required",
+    "message": "Explicit approval is required",
+    "retryable": false,
+    "details": {
+      "approvalRequestId": "22222222-2222-4222-8222-222222222222",
+      "riskTier": "medium",
+      "expiresAt": "2099-12-31T23:59:59Z",
+      "approvalMode": "native"
+    }
+  }
+}

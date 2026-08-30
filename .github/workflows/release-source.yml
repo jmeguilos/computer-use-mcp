@@ -1,0 +1,220 @@
+name: Release source alpha
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  source-release:
+    name: Verify and publish source release
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: source-release
+    steps:
+      - name: Check out the immutable tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+          cache: npm
+
+      - name: Require the tagged commit to be on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+
+      - name: Require manual client acceptance for this exact commit
+        env:
+          ACCEPTED_SHA: ${{ vars.ALPHA_MANUAL_ACCEPTANCE_SHA }}
+        run: |
+          test -n "$ACCEPTED_SHA"
+          test "$ACCEPTED_SHA" = "$GITHUB_SHA"
+
+      - name: Require successful mainline security and build workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          report="$RUNNER_TEMP/workflow-runs.json"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$COMMIT_SHA&event=push&per_page=100" \
+            > "$report"
+          node - "$report" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const required = ["CI", "CodeQL", "SBOM"];
+          const successful = new Set(
+            report.workflow_runs
+              .filter(run =>
+                run.head_sha === process.env.COMMIT_SHA &&
+                run.head_branch === "main" &&
+                run.event === "push" &&
+                run.status === "completed" &&
+                run.conclusion === "success"
+              )
+              .map(run => run.name)
+          );
+          const missing = required.filter(name => !successful.has(name));
+          if (missing.length !== 0) {
+            process.stderr.write(`Required successful mainline workflows are missing: ${missing.join(", ")}\n`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Select the declared npm version
+        run: npm install --global npm@11.5.1 --ignore-scripts
+
+      - name: Verify tag and alpha package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_version="$(node -p 'require("./packages/mcp/package.json").version')"
+          test "$RELEASE_TAG" = "v$package_version"
+          test "$package_version" = "0.1.0-alpha.1"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/macos-host/Support/Info.plist)" = "0.1.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ComputerUseMCPReleaseVersion' apps/macos-host/Support/Info.plist)" = "$package_version"
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run protected provenance gate
+        env:
+          PROVENANCE_DENY_TERMS: ${{ secrets.PROVENANCE_DENY_TERMS }}
+          PROVENANCE_REQUIRE_DENY_TERMS: "1"
+        run: npm run provenance:scan
+
+      - name: Run mandatory source gates
+        run: |
+          npm run audit
+          npm run typecheck
+          npm test
+          npm run build
+          bash scripts/run-swift-tests.sh
+          npm run swift:build
+          npm run swift:universal
+          npm run pack:verify
+
+      - name: Create inspectable npm pack artifact
+        run: |
+          mkdir -p artifacts/release
+          npm pack --workspace @jmeguilos/computer-use-mcp \
+            --pack-destination artifacts/release --json > artifacts/release/npm-pack.json
+          mkdir -p artifacts/npm-package
+          tar -xzf artifacts/release/*.tgz -C artifacts/npm-package
+
+      - name: Generate locked dependency inventories
+        run: npm run sbom
+
+      - name: Generate repository SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom/project.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          syft-version: v1.51.1
+
+      - name: Generate npm-pack-specific SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: artifacts/npm-package/package
+          format: spdx-json
+          output-file: artifacts/release/npm-package.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          syft-version: v1.51.1
+
+      - name: Assemble source-only release evidence
+        run: |
+          cp sbom/npm.cdx.json artifacts/release/
+          cp sbom/swift-dependencies.json artifacts/release/
+          cp sbom/project.spdx.json artifacts/release/
+          cd artifacts/release
+          if find . -mindepth 1 -type d -print -quit | grep -q .; then
+            echo "a directory or application bundle was found in the source release" >&2
+            exit 1
+          fi
+          if find . -type f ! -name '*.tgz' ! -name '*.json' -print -quit | grep -q .; then
+            echo "an unexpected artifact type was found in the source release" >&2
+            exit 1
+          fi
+          shasum -a 256 -- *.tgz *.json > SHA256SUMS
+
+      - name: Attest npm pack provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/release/*.tgz
+
+      - name: Attest npm pack SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/release/*.tgz
+          sbom-path: artifacts/release/npm-package.spdx.json
+
+      - name: Preserve workflow evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-release-${{ github.ref_name }}
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Require release immutability before creating a release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          test "$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq '.enabled')" = true
+
+      - name: Create GitHub prerelease
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          prerelease: true
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          files: artifacts/release/*
+          body: |
+            Source-only security preview. No prebuilt, Developer ID-signed, or
+            notarized macOS application is included. Build the native host from
+            the tagged source and review README.md, SECURITY.md, and PRIVACY.md.
+
+            The attached npm pack artifact is for inspection and local use; this
+            version is not distributed through the npm registry.
+
+      - name: Publish immutable prerelease after every asset is attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release edit "$RELEASE_TAG" --verify-tag
+          --draft=false --prerelease --latest=false
+
+      - name: Verify the published prerelease is immutable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          test "$(gh api
+          -H "X-GitHub-Api-Version: 2026-03-10"
+          "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          --jq '.immutable')" = true

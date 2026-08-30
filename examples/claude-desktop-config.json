@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "computer-use-mcp": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/computer-use-mcp/packages/mcp/dist/index.js"
+      ]
+    }
+  }
+}

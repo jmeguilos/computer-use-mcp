@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a scoped capability or safety improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New permissions, persistent grants, transports, private APIs, capture
+        modes, and action classes require design and threat-model review before
+        implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the outcome, not another product's implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed public behavior
+      description: Include target scope, capabilities, user control, and failure behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: abuse
+    attributes:
+      label: Abuse cases and mitigations
+      description: Explain what a malicious model, client, window, or same-user process could do.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: provenance
+    attributes:
+      label: Provenance
+      options:
+        - label: This proposal is based only on sources permitted by docs/PROVENANCE.md.
+          required: true

@@ -1,0 +1,7 @@
+[mcp_servers.computer_use_mcp]
+command = "node"
+args = ["/ABSOLUTE/PATH/TO/computer-use-mcp/packages/mcp/dist/index.js"]
+startup_timeout_sec = 20
+tool_timeout_sec = 310
+required = true
+default_tools_approval_mode = "prompt"

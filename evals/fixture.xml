@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<evaluation>
+  <qa_pair>
+    <question>Using only the two pre-approved fixture window grants, inspect both accessibility trees. Which window contains the group that combines identity, environment, notifications, and confidence controls? Return the final title word only.</question>
+    <answer>Primary</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Inspect both fixture windows and count all interactive controls: text and secure fields, checkboxes, popups, sliders, and buttons, while excluding groups and static text. Return the total as an integer.</question>
+    <answer>10</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Inspect the ordinary identity field and the credential-style field in the primary fixture, then verify the inspector state has no credential value either. Does any returned accessibility value reveal the passcode? Respond True or False.</question>
+    <answer>False</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Read the selected deployment environment in the primary fixture and confirm the inspector window's immutable build marker is present. Return only the environment value.</question>
+    <answer>Staging</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Read the numeric counter from the inspector and the fractional confidence value from the primary fixture. Add them and return the exact decimal result.</question>
+    <answer>42.75</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Across both fixture accessibility trees, count controls whose visible label is exactly “Duplicate action”; distinguish controls by their stable element IDs. Return the count.</question>
+    <answer>2</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Compare the primary status with the inspector's last-action value. Which single word describes the fixture as operational rather than indicating no prior action?</question>
+    <answer>Ready</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Use the primary fixture's declared logical window dimensions, not PNG byte size or Retina backing pixels. Multiply width by height and return the area in square points as an integer.</question>
+    <answer>374400</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Compare the logical widths returned for both pre-approved fixture windows. Return only the final title word of the wider one.</question>
+    <answer>Primary</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Inspect the notifications control and cross-check that its state is not the inspector's numeric counter. Is notifications enabled? Respond True or False.</question>
+    <answer>True</answer>
+  </qa_pair>
+</evaluation>

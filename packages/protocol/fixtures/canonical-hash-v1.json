@@ -1,0 +1,11 @@
+{
+  "input": {
+    "z": 1,
+    "a": {
+      "d": true,
+      "c": "x"
+    }
+  },
+  "canonical_json": "{\"a\":{\"c\":\"x\",\"d\":true},\"z\":1}",
+  "sha256": "9b50bbaa361b14afdffb2549b81c02d85611c86715c995bff6c063ce53f43f21"
+}

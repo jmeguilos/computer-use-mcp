@@ -1,0 +1,9 @@
+{
+  "kind": "window",
+  "app": {
+    "kind": "bundle_id",
+    "value": "com.jmeguilos.computer-use-mcp.fixture"
+  },
+  "window_hint": "Primary",
+  "launch_if_needed": false
+}

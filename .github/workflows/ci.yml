@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provenance-node:
+    name: Provenance and Node
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up current LTS Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+          cache: npm
+
+      - name: Select the declared npm version
+        run: npm install --global npm@11.5.1 --ignore-scripts
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Reject moderate-or-higher dependency vulnerabilities
+        run: npm run audit
+
+      - name: Scan provenance and workflow pins
+        env:
+          PROVENANCE_DENY_TERMS: ${{ secrets.PROVENANCE_DENY_TERMS }}
+          PROVENANCE_REQUIRE_DENY_TERMS: >-
+            ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+            github.event_name == 'workflow_dispatch') && '1' || '0' }}
+        run: npm run provenance:scan
+
+      - name: Validate checked-in client JSON
+        run: >-
+          node -e 'for (const file of
+          ["examples/claude-desktop-config.json","examples/claude-code.mcp.json","examples/cursor-mcp.json"])
+          JSON.parse(require("node:fs").readFileSync(file,"utf8"))'
+
+      - name: Lint public Markdown
+        run: >-
+          npm exec -- markdownlint-cli2 --config
+          .github/markdownlint-cli2.jsonc README.md SECURITY.md CONTRIBUTING.md
+          PRIVACY.md THIRD_PARTY_NOTICES.md 'docs/**/*.md' 'examples/**/*.md'
+          'sbom/**/*.md' 'tests/**/*.md' '.github/**/*.md'
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  native-macos:
+    name: Native macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js for the dependency-free provenance gate
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+
+      - name: Record native toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Scan provenance before native build
+        env:
+          PROVENANCE_DENY_TERMS: ${{ secrets.PROVENANCE_DENY_TERMS }}
+          PROVENANCE_REQUIRE_DENY_TERMS: >-
+            ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+            github.event_name == 'workflow_dispatch') && '1' || '0' }}
+        run: node scripts/provenance-scan.mjs
+
+      - name: Validate native bundle metadata
+        run: |
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/macos-host/Support/Info.plist)" = "0.1.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ComputerUseMCPReleaseVersion' apps/macos-host/Support/Info.plist)" = "0.1.0-alpha.1"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ComputerUseMCPReleaseVersion' apps/macos-host/Support/Fixture-Info.plist)" = "0.1.0-alpha.1"
+
+      - name: Run native tests
+        run: bash scripts/run-swift-tests.sh
+
+      - name: Build native release products
+        run: swift build --package-path apps/macos-host --configuration release
+
+      - name: Verify universal source build
+        run: bash scripts/build-universal.sh
+
+      - name: Assemble and validate non-published smoke bundles
+        run: |
+          host_app="$RUNNER_TEMP/ComputerUseMCPHost.app"
+          bash apps/macos-host/Scripts/assemble-app.sh \
+            --adhoc-sign --output "$host_app"
+          bash apps/macos-host/Scripts/validate-app.sh "$host_app"
+          fixture_app="$(bash apps/macos-host/Scripts/run-fixture.sh --assemble-only)"
+          test -d "$fixture_app"
+          codesign --verify --strict "$fixture_app"
+
+  package-boundary:
+    name: Package boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: provenance-node
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+          cache: npm
+
+      - name: Select the declared npm version
+        run: npm install --global npm@11.5.1 --ignore-scripts
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build package
+        run: npm run build
+
+      - name: Create and inspect npm pack artifact
+        run: npm run pack:verify
+
+  minimum-node-20:
+    name: Minimum Node 20
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up final Node.js 20 release
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20.20.2
+          cache: npm
+
+      - name: Select the declared npm version
+        run: npm install --global npm@11.5.1 --ignore-scripts
+
+      - name: Install and verify minimum-runtime compatibility
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+          npm run build

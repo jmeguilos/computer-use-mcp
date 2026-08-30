@@ -1,0 +1,224 @@
+name: Gated signed macOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing reviewed source tag to build
+        required: true
+        type: string
+      enable:
+        description: Explicitly enable the protected signing job
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  signed-macos:
+    name: Developer ID, hardened runtime, and notarization
+    if: ${{ inputs.enable == true && vars.ENABLE_SIGNED_MACOS_RELEASE == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: macos-signing
+    steps:
+      - name: Check out the reviewed tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+          cache: npm
+
+      - name: Require an immutable version tag
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          node -e 'if (!/^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(process.env.SOURCE_TAG ?? "")) process.exit(1)' || {
+            echo "source_tag must be an exact semantic-version tag" >&2
+            exit 1
+          }
+          test "$(git describe --tags --exact-match)" = "$SOURCE_TAG"
+
+      - name: Require the tagged commit to be on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+      - name: Require successful mainline security and build workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit_sha="$(git rev-parse HEAD)"
+          report="$RUNNER_TEMP/workflow-runs.json"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$commit_sha&event=push&per_page=100" \
+            > "$report"
+          node - "$report" "$commit_sha" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const commitSha = process.argv[3];
+          const required = ["CI", "CodeQL", "SBOM"];
+          const successful = new Set(
+            report.workflow_runs
+              .filter(run =>
+                run.head_sha === commitSha &&
+                run.head_branch === "main" &&
+                run.event === "push" &&
+                run.status === "completed" &&
+                run.conclusion === "success"
+              )
+              .map(run => run.name)
+          );
+          const missing = required.filter(name => !successful.has(name));
+          if (missing.length !== 0) {
+            process.stderr.write(`Required successful mainline workflows are missing: ${missing.join(", ")}\n`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Require every protected signing secret
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          DEVELOPER_ID: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          for value in "$CERTIFICATE" "$CERTIFICATE_PASSWORD" "$DEVELOPER_ID" \
+            "$APPLE_ID" "$APPLE_TEAM_ID" "$APPLE_PASSWORD" "$KEYCHAIN_PASSWORD"; do
+            test -n "$value" || { echo "protected signing secret is missing" >&2; exit 1; }
+          done
+
+      - name: Require tag, package, and native bundle versions to agree
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          package_version="$(node -p 'require("./packages/mcp/package.json").version')"
+          bundle_version="${package_version%%-*}"
+          test "$SOURCE_TAG" = "v$package_version"
+          test "$(node -p 'require("./package.json").version')" = "$package_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/macos-host/Support/Info.plist)" = "$bundle_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ComputerUseMCPReleaseVersion' apps/macos-host/Support/Info.plist)" = "$package_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ComputerUseMCPReleaseVersion' apps/macos-host/Support/Fixture-Info.plist)" = "$package_version"
+
+      - name: Select the declared npm version and install locked dependencies
+        run: |
+          npm install --global npm@11.5.1 --ignore-scripts
+          npm ci --ignore-scripts
+
+      - name: Run protected provenance gate
+        env:
+          PROVENANCE_DENY_TERMS: ${{ secrets.PROVENANCE_DENY_TERMS }}
+          PROVENANCE_REQUIRE_DENY_TERMS: "1"
+        run: npm run provenance:scan
+
+      - name: Re-run mandatory gates
+        run: |
+          npm run audit
+          npm run typecheck
+          npm test
+          npm run build
+          bash scripts/run-swift-tests.sh
+          npm run swift:universal
+
+      - name: Import Developer ID certificate into an ephemeral keychain
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/computer-use-mcp.keychain-db"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+      - name: Assemble and sign the hardened app
+        env:
+          DEVELOPER_ID: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+        run: |
+          products="apps/macos-host/.build/apple/Products/Release"
+          app="artifacts/signed/ComputerUseMCPHost.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers"
+          cp apps/macos-host/Support/Info.plist "$app/Contents/Info.plist"
+          cp "$products/ComputerUseMCPHost" "$app/Contents/MacOS/"
+          cp "$products/ComputerUseMCPBridge" "$app/Contents/Helpers/"
+          codesign --force --options runtime --timestamp \
+            --identifier com.jmeguilos.computer-use-mcp.bridge --sign "$DEVELOPER_ID" \
+            --entitlements .github/release/ComputerUseMCPHost.entitlements \
+            "$app/Contents/Helpers/ComputerUseMCPBridge"
+          codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
+            --entitlements .github/release/ComputerUseMCPHost.entitlements "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --requirements - --verbose=4 "$app"
+
+      - name: Notarize, staple, and assess
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          app="artifacts/signed/ComputerUseMCPHost.app"
+          archive="artifacts/signed/ComputerUseMCPHost-notarized.zip"
+          ditto -c -k --keepParent "$app" "$archive"
+          xcrun notarytool submit "$archive" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          rm "$archive"
+          ditto -c -k --keepParent "$app" "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - name: Attest notarized artifact provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/signed/ComputerUseMCPHost-notarized.zip
+
+      - name: Generate signed application SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: artifacts/signed/ComputerUseMCPHost.app
+          format: spdx-json
+          output-file: artifacts/signed/ComputerUseMCPHost.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          syft-version: v1.51.1
+
+      - name: Attest notarized artifact SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/signed/ComputerUseMCPHost-notarized.zip
+          sbom-path: artifacts/signed/ComputerUseMCPHost.spdx.json
+
+      - name: Upload protected review artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notarized-macos-${{ inputs.source_tag }}
+          path: |
+            artifacts/signed/ComputerUseMCPHost-notarized.zip
+            artifacts/signed/ComputerUseMCPHost-notarized.zip.sha256
+            artifacts/signed/ComputerUseMCPHost.spdx.json
+          if-no-files-found: error
+          retention-days: 30

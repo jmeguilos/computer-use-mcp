@@ -1,0 +1,26 @@
+{
+  "protocol": { "major": 1, "minor": 0 },
+  "id": "request-hello-0001",
+  "method": "hello",
+  "auth": {
+    "token": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+  },
+  "client": {
+    "uid": 501,
+    "pid": 4242,
+    "name": "computer-use-mcp-bridge",
+    "instanceId": "instance-0000000000000001"
+  },
+  "capabilities": [
+    "inventory.read",
+    "window.capture",
+    "display.capture",
+    "accessibility.read",
+    "accessibility.action",
+    "input.synthetic",
+    "indicator.control",
+    "risk.approve",
+    "session.stop"
+  ],
+  "nonce": "nonce-0000000000000000000001"
+}

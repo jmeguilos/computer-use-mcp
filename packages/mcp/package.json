@@ -1,0 +1,55 @@
+{
+  "name": "@jmeguilos/computer-use-mcp",
+  "version": "0.1.0-alpha.1",
+  "description": "A local, window-scoped macOS computer-use MCP server",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jmeguilos/computer-use-mcp.git"
+  },
+  "homepage": "https://github.com/jmeguilos/computer-use-mcp#readme",
+  "bugs": "https://github.com/jmeguilos/computer-use-mcp/issues",
+  "type": "module",
+  "bin": {
+    "computer-use-mcp": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "24.3.0",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
+  }
+}

@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible, non-security defect using synthetic data
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a vulnerability or attach real screenshots, accessibility
+        dumps, typed text, tokens, audit logs, or customer data here. Follow
+        SECURITY.md for private reporting.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This is not a security or privacy vulnerability.
+          required: true
+        - label: I can reproduce it with the synthetic fixture or other non-sensitive data.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0-alpha.1 or commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, architecture, Node version, and MCP client
+      placeholder: macOS 14.6, arm64, Node 20.20.2, Codex CLI
+    validations:
+      required: true
+
+  - type: dropdown
+    id: permissions
+    attributes:
+      label: Granted macOS permissions
+      multiple: true
+      options:
+        - Screen Recording
+        - Accessibility
+        - Neither
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Synthetic reproduction
+      description: Include exact tool names and sanitized arguments; replace all opaque IDs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Sanitized doctor summary
+      description: Remove usernames, paths, app/window names, signing details, and tokens.

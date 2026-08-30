@@ -1,0 +1,36 @@
+{
+  "name": "computer-use-mcp-workspace",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Clean-room macOS computer control over local MCP",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@11.5.1",
+  "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "6.0.1",
+    "markdownlint-cli2": "0.23.2"
+  },
+  "scripts": {
+    "audit": "npm audit --audit-level=moderate",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "swift:build": "swift build --package-path apps/macos-host",
+    "swift:test": "bash scripts/run-swift-tests.sh",
+    "swift:universal": "bash scripts/build-universal.sh",
+    "setup": "npm run setup:local && npm run build --workspace @jmeguilos/computer-use-mcp && node packages/mcp/dist/index.js setup",
+    "setup:local": "bash scripts/setup-local.sh --adhoc-sign",
+    "doctor": "npm run build --workspace @jmeguilos/computer-use-mcp && node packages/mcp/dist/index.js doctor",
+    "pack:verify": "bash scripts/verify-pack.sh",
+    "provenance:scan": "node scripts/provenance-scan.mjs",
+    "sbom": "bash scripts/generate-sbom.sh",
+    "verify": "npm run audit && npm run provenance:scan && npm run typecheck && npm run test && npm run build && npm run swift:test && npm run swift:build && npm run swift:universal && npm run pack:verify"
+  }
+}
