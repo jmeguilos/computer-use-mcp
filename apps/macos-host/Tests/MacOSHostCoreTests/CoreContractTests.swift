@@ -14,6 +14,14 @@ private func temporaryDirectory(mode: mode_t = S_IRWXU) throws -> URL {
     return base
 }
 
+private func shortTemporarySocketDirectory() throws -> URL {
+    let suffix = UUID().uuidString.prefix(12)
+    let base = URL(fileURLWithPath: "/tmp/cumcp-\(suffix)", isDirectory: true)
+    guard mkdir(base.path, S_IRWXU) == 0 else { throw FixtureFailure.unexpected }
+    guard chmod(base.path, S_IRWXU) == 0 else { throw FixtureFailure.unexpected }
+    return base
+}
+
 private func fileMode(_ url: URL) throws -> mode_t {
     var status = stat()
     guard lstat(url.path, &status) == 0 else { throw FixtureFailure.unexpected }
@@ -301,7 +309,9 @@ struct RuntimeSecurityTests {
     }
 
     @Test func maintenanceRunsWhileListenerAcceptIsBlocked() async throws {
-        let directory = try temporaryDirectory()
+        // Darwin sockaddr_un paths are short. Hosted-runner TMPDIR values can
+        // exceed that bound before the fixture even appends `host.sock`.
+        let directory = try shortTemporarySocketDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let configuration = SocketConfiguration(
             runtimeDirectory: directory,
