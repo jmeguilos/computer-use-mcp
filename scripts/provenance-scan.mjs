@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  realpathSync
+} from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
@@ -10,6 +17,9 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = realpathSync(resolve(scriptDirectory, ".."));
 const maximumFiles = 20_000;
 const maximumSourceBytes = 2 * 1024 * 1024;
+if (typeof constants.O_NOFOLLOW !== "number") {
+  throw new Error("The provenance scanner requires O_NOFOLLOW support");
+}
 
 const requiredFiles = [
   "LICENSE",
@@ -220,18 +230,44 @@ for (const path of files) {
     continue;
   }
 
+  let descriptor;
   let stat;
+  let buffer;
   try {
-    stat = lstatSync(absolutePath);
-  } catch {
-    failures.push(`${path}: cannot be read`);
+    descriptor = openSync(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const resolvedOpenPath = realpathSync(absolutePath);
+    const resolvedRelativePath = relative(repositoryRoot, resolvedOpenPath);
+    if (isAbsolute(resolvedRelativePath) ||
+        resolvedRelativePath.startsWith(`..${sep}`) || resolvedRelativePath === "..") {
+      failures.push(`${path}: opened file resolves outside the repository`);
+      continue;
+    }
+    stat = fstatSync(descriptor, { bigint: true });
+    if (!stat.isFile()) continue;
+
+    if (stat.size > BigInt(maximumSourceBytes)) {
+      failures.push(`${path}: source file exceeds ${maximumSourceBytes} bytes`);
+      continue;
+    }
+
+    buffer = readFileSync(descriptor);
+    const postReadStat = fstatSync(descriptor, { bigint: true });
+    if (postReadStat.dev !== stat.dev || postReadStat.ino !== stat.ino ||
+        postReadStat.size !== stat.size || postReadStat.mtimeNs !== stat.mtimeNs ||
+        postReadStat.ctimeNs !== stat.ctimeNs) {
+      failures.push(`${path}: file changed while it was being scanned`);
+      continue;
+    }
+  } catch (error) {
+    if (error?.code === "ELOOP") {
+      failures.push(`${path}: symbolic links are not allowed in the source-only alpha`);
+    } else {
+      failures.push(`${path}: cannot be opened safely`);
+    }
     continue;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
-  if (stat.isSymbolicLink()) {
-    failures.push(`${path}: symbolic links are not allowed in the source-only alpha`);
-    continue;
-  }
-  if (!stat.isFile()) continue;
 
   const components = path.toLocaleLowerCase("en-US").split("/");
   const prohibitedComponent = components.find(component => prohibitedPathComponents.has(component));
@@ -243,12 +279,6 @@ for (const path of files) {
     failures.push(`${path}: packaged/binary artifact extension is forbidden in the source-only alpha`);
   }
 
-  if (stat.size > maximumSourceBytes) {
-    failures.push(`${path}: source file exceeds ${maximumSourceBytes} bytes`);
-    continue;
-  }
-
-  const buffer = readFileSync(absolutePath);
   const description = magicDescription(buffer);
   if (description !== undefined) failures.push(`${path}: detected ${description}`);
   if (buffer.includes(0)) {

@@ -48,7 +48,7 @@ for required_file in "${required_files[@]}"; do
   fi
 done
 
-if rg -i '(^|/)(node_modules|src|test|tests)/|\.(app|dmg|pkg|xcodearchive|zip|node)$|/ComputerUseMCP(Host|Bridge)$' "$listing"; then
+if grep -Eiq '(^|/)(node_modules|src|test|tests)/|\.(app|dmg|pkg|xcodearchive|zip|node)$|/ComputerUseMCP(Host|Bridge)$' "$listing"; then
   echo "Package contains development inputs, dependencies, or a native/downloadable artifact." >&2
   exit 1
 fi
