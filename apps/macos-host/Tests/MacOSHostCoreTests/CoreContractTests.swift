@@ -568,6 +568,21 @@ struct GrantFrameTransformTests {
         }
     }
 
+    @Test func windowIdentityPolicyRejectsBlankOrWhitespaceOwnerNames() {
+        #expect(ScreenCaptureService.isUsableApplicationIdentity(
+            processID: 700,
+            bundleIdentifier: "com.example.fixture",
+            name: "Fixture"
+        ))
+        for name in ["", " ", "\n", "\t\r"] {
+            #expect(!ScreenCaptureService.isUsableApplicationIdentity(
+                processID: 700,
+                bundleIdentifier: "com.example.fixture",
+                name: name
+            ))
+        }
+    }
+
     @Test func listAppsFailsClosedOnInvalidCaptureProviderIdentity() async throws {
         let invalidApplication = ApplicationDescriptor(
             bundleIdentifier: "",

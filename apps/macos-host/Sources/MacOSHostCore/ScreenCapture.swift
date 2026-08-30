@@ -220,7 +220,19 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
         name: String,
         ownBundleIdentifier: String
     ) -> Bool {
-        processID > 1 && bundleIdentifier != ownBundleIdentifier &&
+        isUsableApplicationIdentity(
+            processID: processID,
+            bundleIdentifier: bundleIdentifier,
+            name: name
+        ) && bundleIdentifier != ownBundleIdentifier
+    }
+
+    static func isUsableApplicationIdentity(
+        processID: Int32,
+        bundleIdentifier: String,
+        name: String
+    ) -> Bool {
+        processID > 1 &&
             !bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -507,8 +519,11 @@ public final class ScreenCaptureService: ScreenCaptureServing, @unchecked Sendab
 
     static func makeWindowDescriptor(_ window: SCWindow) -> WindowDescriptor? {
         guard let app = window.owningApplication,
-              app.processID > 1,
-              !app.bundleIdentifier.isEmpty,
+              Self.isUsableApplicationIdentity(
+                processID: app.processID,
+                bundleIdentifier: app.bundleIdentifier,
+                name: app.applicationName
+              ),
               let signingIdentity = ProcessCodeIdentity.designatedRequirementDigest(processID: app.processID),
               let launchDate = NSRunningApplication(processIdentifier: app.processID)?.launchDate,
               let identity = try? WindowIdentity(
