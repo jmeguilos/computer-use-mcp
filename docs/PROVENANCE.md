@@ -95,6 +95,12 @@ term values. Local and untrusted pull-request scans may omit it. Protected
 a nonempty array. This keeps private provenance terms out of the public project
 without making the release gate optional.
 
+The scanner removes only the declared upstream repository name, author notice,
+and immutable revision from the reviewed license/notice/provenance surfaces and
+the adapted installer module before applying private deny terms. This narrow
+exception permits required public attribution without exempting other content or
+paths from the private scan.
+
 Every tracked file is scanned, including a file forcibly committed beneath a
 normally ignored dependency, build, artifact, or generated-SBOM path. Such a
 tracked ignored-path file is itself a gate failure. Ignore rules apply only to

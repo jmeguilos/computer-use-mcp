@@ -163,6 +163,35 @@ function looksLikeWorkflow(path) {
   return /^\.github\/workflows\/[^/]+\.ya?ml$/u.test(path);
 }
 
+// Private deny terms catch undeclared source origins. These exact paths are the
+// reviewed attribution/license surfaces for one declared MIT adaptation, so
+// remove only its public origin markers before applying the private list. All
+// other text in these files, and every other repository file, is still checked.
+const declaredThirdPartyReferencePaths = new Set([
+  "LICENSE",
+  "NOTICE",
+  "THIRD_PARTY_NOTICES.md",
+  "docs/PROVENANCE.md",
+  "packages/mcp/LICENSE",
+  "packages/mcp/THIRD_PARTY_NOTICES.md",
+  "packages/mcp/src/client-config.ts",
+  "scripts/provenance-scan.mjs"
+]);
+const declaredThirdPartyReferenceMarkers = [
+  "ifuryst",
+  "open-codex-computer-use",
+  "503a5e54c812cde33c2f986f6199d16f7171538f",
+  "copyright (c) 2026 leo"
+];
+
+function textForPrivateDenyScan(path, lowerText) {
+  if (!declaredThirdPartyReferencePaths.has(path)) return lowerText;
+  return declaredThirdPartyReferenceMarkers.reduce(
+    (text, marker) => text.replaceAll(marker, ""),
+    lowerText
+  );
+}
+
 function checkWorkflow(path, text, failures) {
   for (const [index, line] of text.split("\n").entries()) {
     const use = line.match(/^\s*-?\s*uses:\s*["']?([^\s"']+)["']?\s*(?:#.*)?$/u);
@@ -300,7 +329,8 @@ for (const path of files) {
 
   const lowerPath = path.toLocaleLowerCase("en-US");
   const lowerText = text.toLocaleLowerCase("en-US");
-  if (denyTerms.some(term => lowerPath.includes(term) || lowerText.includes(term))) {
+  const privateDenyText = textForPrivateDenyScan(path, lowerText);
+  if (denyTerms.some(term => lowerPath.includes(term) || privateDenyText.includes(term))) {
     failures.push(`${path}: matches a private provenance deny term`);
   }
 
