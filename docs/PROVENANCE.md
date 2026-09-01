@@ -1,15 +1,17 @@
-# Clean-room provenance policy
+# Source provenance policy
 
-Computer Use MCP is independently authored. Behavioral compatibility is defined
-from public specifications, platform documentation, user-authored requirements,
-and tests written from observable inputs and outputs. Compatibility is not a
-license to copy another product's implementation or visual assets.
+Computer Use MCP combines original Apache-2.0 work with deliberately selected,
+compatible open-source material. Licensed reuse is welcome when its origin,
+immutable revision, license, and required notices are recorded. The current
+design acknowledges MIT-licensed work from `ifuryst/open-codex-computer-use` at
+revision `503a5e54c812cde33c2f986f6199d16f7171538f`; the retained license is in
+the root `LICENSE` and `THIRD_PARTY_NOTICES.md`.
 
 This policy applies to code, tests, documentation, protocol descriptions,
 fixtures, icons, cursor art, screenshots, build products, generated code, and
 training/context material intentionally used to produce a contribution.
 
-## Permitted inputs
+## Permitted inputs and reuse
 
 - public MCP specifications and official SDK documentation;
 - public Apple developer documentation and headers shipped in the selected SDK;
@@ -18,12 +20,15 @@ training/context material intentionally used to produce a contribution.
 - behavior observed through ordinary documented product use, recorded as
   abstract requirements without copying content or implementation details; and
 - third-party libraries intentionally added through a package manager when their
-  license, version, and purpose are reviewed and captured in the lockfile/SBOM.
+  license, version, and purpose are reviewed and captured in the lockfile/SBOM;
+  and
+- third-party source with redistribution and modification terms compatible with
+  this project, provided its immutable revision and notices are retained.
 
 ## Prohibited material
 
-- copied or mechanically translated third-party source code without an approved
-  compatible-license contribution path;
+- copied or mechanically translated third-party source code without compatible
+  redistribution terms or without required attribution;
 - decompiled, disassembled, class-dumped, injected, or otherwise extracted
   implementation code;
 - extracted application bundles, frameworks, binaries, compiled asset catalogs,
@@ -37,20 +42,20 @@ Do not commit research dumps “temporarily.” Use synthetic fixtures and abstr
 notes. If a source cannot be cited publicly and reviewed safely, it is not an
 acceptable implementation input.
 
-## Independent compatibility workflow
+## Adaptation workflow
 
-For compatibility work, separate observation from implementation:
+1. Record the upstream repository, immutable revision, file or design being
+   adapted, and license before merging the change.
+2. Preserve required notices in both source distribution and packaged output.
+3. Prefer source-level adaptation and reviewable patches. Never import compiled
+   applications, extracted assets, signing material, or reverse-engineered
+   proprietary implementation details.
+4. Verify adapted behavior with synthetic fixtures and acceptance tests.
+5. Record material behavioral and security deviations explicitly.
 
-1. Write an issue containing only the user-visible scenario, public API
-   constraints, abstract input/output behavior, and safety expectation.
-2. Have implementation code written from that issue and official documentation,
-   without access to non-permitted source or assets.
-3. Verify with an original synthetic fixture and black-box acceptance test.
-4. Record deviations explicitly; do not fill gaps by importing another product.
-
-Pixel-identical UI replication is not a goal. The left-edge indicator uses
-original layout, colors, copy, shapes, and interaction code designed for this
-project.
+Visual behavior may be made familiar, but artwork and branding must be original
+or separately licensed. The left-edge indicator in this project remains an
+original implementation.
 
 ## Third-party contributions
 
@@ -58,14 +63,13 @@ Every pull request must affirm:
 
 - I authored the contribution or have the right to submit it;
 - it is licensed under Apache-2.0;
-- it was created only from permitted inputs above;
+- it was created from permitted inputs above and all reuse is declared;
 - no prohibited source, binary, asset, or private data is included; and
 - all intentional dependencies or vendored material are disclosed.
 
-Vendoring is exceptional. It requires advance maintainer approval, an isolated
-directory, exact source/version URL, license compatibility review, retained
-notices, an entry in `THIRD_PARTY_NOTICES.md`, and SBOM coverage. There are no
-vendoring exceptions in `v0.1.0-alpha.1`.
+Vendoring requires an isolated directory, exact source/version URL, license
+compatibility review, retained notices, an entry in
+`THIRD_PARTY_NOTICES.md`, and SBOM coverage.
 
 ## Automated gate
 
@@ -80,7 +84,7 @@ vendoring exceptions in `v0.1.0-alpha.1`.
 - maintainer-supplied private deny terms.
 
 The scanner is a backstop, not a legal conclusion. Passing it does not establish
-copyright ownership or clean-room authorship. Reviewers must still inspect file
+copyright ownership or license compliance. Reviewers must still inspect file
 origin and the pull-request attestation.
 
 Maintainers can supply a JSON array of literal, case-insensitive deny terms in
@@ -90,6 +94,12 @@ term values. Local and untrusted pull-request scans may omit it. Protected
 `PROVENANCE_REQUIRE_DENY_TERMS=1` and fail unless the repository secret contains
 a nonempty array. This keeps private provenance terms out of the public project
 without making the release gate optional.
+
+The scanner removes only the declared upstream repository name, author notice,
+and immutable revision from the reviewed license/notice/provenance surfaces and
+the adapted installer module before applying private deny terms. This narrow
+exception permits required public attribution without exempting other content or
+paths from the private scan.
 
 Every tracked file is scanned, including a file forcibly committed beneath a
 normally ignored dependency, build, artifact, or generated-SBOM path. Such a

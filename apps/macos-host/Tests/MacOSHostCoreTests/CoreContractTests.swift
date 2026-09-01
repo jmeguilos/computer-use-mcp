@@ -1495,6 +1495,376 @@ struct GrantFrameTransformTests {
     }
 }
 
+@Suite("Remembered app access controller integration", .serialized)
+struct RememberedAppAccessControllerTests {
+    @Test func explicitAlwaysAllowThenUniqueVerifiedRequestReusesWithoutMutation() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let window = try makeWindow(bundle: "com.example.remembered-target", title: "Primary")
+        let presenter = RecordingAccessPresenterFixture(persistence: .alwaysAllowApp)
+        let controller = makeController(
+            windows: [window],
+            presenter: presenter,
+            consentStore: store
+        )
+        let peer = requester()
+        let connection = makeConnection(peer: peer)
+
+        let first = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(bundleIdentifier: window.identity.bundleIdentifier),
+            context: context("remember-explicit", connection: connection)
+        )
+        #expect(first.objectValue?["status"] == .string("granted"))
+        #expect(await presenter.requestCount() == 1)
+        let recorded = await store.all()
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.policy == .autoGrantUniqueWindow)
+        #expect(recorded.first?.capabilities == [.observe])
+
+        let grantID = try #require(first.objectValue?["grantId"]?.stringValue)
+        _ = try await controller.handle(
+            method: "releaseAccess",
+            params: .object(["grantId": .string(grantID)]),
+            context: context("remember-release", connection: connection)
+        )
+
+        let reused = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(bundleIdentifier: window.identity.bundleIdentifier),
+            context: context("remember-reuse", connection: connection)
+        )
+        #expect(reused.objectValue?["status"] == .string("granted"))
+        #expect(await presenter.requestCount() == 1)
+        #expect(await store.all() == recorded)
+    }
+
+    @Test func multipleCandidatesPromptButWindowHintCanNarrowToReusableExactWindow() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let primary = try makeWindow(
+            id: 710,
+            bundle: "com.example.multi-window-target",
+            title: "Primary"
+        )
+        let inspector = try makeWindow(
+            id: 711,
+            bundle: primary.identity.bundleIdentifier,
+            title: "Fixture Inspector"
+        )
+        let peer = requester()
+        try await store.recordAutoGrantUniqueWindow(
+            requester: peer,
+            window: primary.identity,
+            capabilities: [.observe],
+            now: Date(timeIntervalSince1970: 100)
+        )
+        let presenter = RecordingAccessPresenterFixture(persistence: .allowOnce)
+        let controller = makeController(
+            windows: [primary, inspector],
+            presenter: presenter,
+            consentStore: store
+        )
+        let connection = makeConnection(peer: peer)
+
+        let ambiguous = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(bundleIdentifier: primary.identity.bundleIdentifier),
+            context: context("remember-ambiguous", connection: connection)
+        )
+        #expect(ambiguous.objectValue?["status"] == .string("granted"))
+        let requestsAfterAmbiguity = await presenter.requests()
+        #expect(requestsAfterAmbiguity.count == 1)
+        #expect(requestsAfterAmbiguity.first?.candidates.count == 2)
+        #expect(requestsAfterAmbiguity.first?.appConsentExists == true)
+
+        let narrowed = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(
+                bundleIdentifier: primary.identity.bundleIdentifier,
+                windowHint: "Inspector"
+            ),
+            context: context("remember-hint", connection: connection)
+        )
+        #expect(narrowed.objectValue?["status"] == .string("granted"))
+        #expect(narrowed.objectValue?["target"]?.objectValue?["title"] == .string("Fixture Inspector"))
+        #expect(await presenter.requestCount() == 1)
+    }
+
+    @Test func requesterIdentityMismatchAndCapabilityEscalationAlwaysPrompt() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let window = try makeWindow(bundle: "com.example.requester-bound-target", title: "Primary")
+        let approvedPeer = requester()
+        try await store.recordAutoGrantUniqueWindow(
+            requester: approvedPeer,
+            window: window.identity,
+            capabilities: [.observe],
+            now: Date(timeIntervalSince1970: 200)
+        )
+        let presenter = RecordingAccessPresenterFixture(persistence: .allowOnce)
+        let controller = makeController(
+            windows: [window],
+            presenter: presenter,
+            consentStore: store
+        )
+
+        let differentBundle = requester(bundleIdentifier: "com.example.other-harness")
+        let differentSigning = requester(signingIdentity: String(repeating: "e", count: 64))
+        for (requestID, peer) in [
+            ("remember-other-bundle", differentBundle),
+            ("remember-other-signing", differentSigning),
+        ] {
+            let result = try await controller.handle(
+                method: "requestAccess",
+                params: windowRequest(bundleIdentifier: window.identity.bundleIdentifier),
+                context: context(requestID, connection: makeConnection(peer: peer))
+            )
+            #expect(result.objectValue?["status"] == .string("granted"))
+        }
+
+        let escalation = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(
+                bundleIdentifier: window.identity.bundleIdentifier,
+                capabilities: [.observe, .interact]
+            ),
+            context: context(
+                "remember-capability-escalation",
+                connection: makeConnection(peer: approvedPeer)
+            )
+        )
+        #expect(escalation.objectValue?["status"] == .string("granted"))
+        let requests = await presenter.requests()
+        #expect(requests.count == 3)
+        #expect(requests.allSatisfy { !$0.appConsentExists })
+        #expect(requests.last?.capabilities == [.observe, .interact])
+    }
+
+    @Test func legacyPromptOnlyRecordCannotAuthorizeReuse() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let window = try makeWindow(bundle: "com.example.legacy-target", title: "Primary")
+        try await store.record(
+            window: window.identity,
+            capabilities: [.observe],
+            now: Date(timeIntervalSince1970: 300)
+        )
+        let presenter = RecordingAccessPresenterFixture(persistence: .allowOnce)
+        let controller = makeController(
+            windows: [window],
+            presenter: presenter,
+            consentStore: store
+        )
+        let result = try await controller.handle(
+            method: "requestAccess",
+            params: windowRequest(bundleIdentifier: window.identity.bundleIdentifier),
+            context: context(
+                "remember-legacy",
+                connection: makeConnection(peer: requester())
+            )
+        )
+        #expect(result.objectValue?["status"] == .string("granted"))
+        let requests = await presenter.requests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.appConsentExists == false)
+        #expect((await store.all()).first?.policy == .promptEachWindow)
+    }
+
+    @Test func displayGrantAlwaysUsesPresenterAndRemainsSessionOnly() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let window = try makeWindow(bundle: "com.example.display-target", title: "Primary")
+        let peer = requester()
+        try await store.recordAutoGrantUniqueWindow(
+            requester: peer,
+            window: window.identity,
+            capabilities: [.observe],
+            now: Date(timeIntervalSince1970: 400)
+        )
+        let presenter = RecordingAccessPresenterFixture(persistence: .alwaysAllowApp)
+        let controller = makeController(
+            windows: [window],
+            presenter: presenter,
+            consentStore: store
+        )
+        let result = try await controller.handle(
+            method: "requestAccess",
+            params: displayRequest(),
+            context: context(
+                "remember-display",
+                connection: makeConnection(peer: peer)
+            )
+        )
+        #expect(result.objectValue?["status"] == .string("granted"))
+        #expect(result.objectValue?["sessionOnly"] == .bool(true))
+        let requests = await presenter.requests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.displayTarget == true)
+        #expect(requests.first?.appConsentExists == false)
+    }
+
+    @Test func autoReuseIndicatorFailurePublishesNothingAndPreservesPolicy() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try PersistentAppConsentStore(
+            url: directory.appendingPathComponent("consents.json")
+        )
+        let window = try makeWindow(bundle: "com.example.indicator-target", title: "Primary")
+        let peer = requester()
+        try await store.recordAutoGrantUniqueWindow(
+            requester: peer,
+            window: window.identity,
+            capabilities: [.observe],
+            now: Date(timeIntervalSince1970: 500)
+        )
+        let before = await store.all()
+        let presenter = RecordingAccessPresenterFixture(persistence: .allowOnce)
+        let controller = makeController(
+            windows: [window],
+            presenter: presenter,
+            consentStore: store,
+            indicator: FailingIndicatorFixture()
+        )
+        let connection = makeConnection(peer: peer)
+        do {
+            _ = try await controller.handle(
+                method: "requestAccess",
+                params: windowRequest(bundleIdentifier: window.identity.bundleIdentifier),
+                context: context("remember-indicator-failure", connection: connection)
+            )
+            Issue.record("auto-reused grant was published without its mandatory indicator")
+        } catch {
+            #expect(WireErrorMapping.map(error).code == "INTERNAL_ERROR")
+        }
+        #expect(await presenter.requestCount() == 0)
+        #expect(await controller.activeGrantCount() == 0)
+        #expect(await store.all() == before)
+        let status = try await controller.handle(
+            method: "status",
+            params: .object([:]),
+            context: context("remember-indicator-status", connection: connection)
+        )
+        #expect(status.objectValue?["activeGrants"] == .array([]))
+    }
+
+    private func makeController(
+        windows: [WindowDescriptor],
+        presenter: RecordingAccessPresenterFixture,
+        consentStore: PersistentAppConsentStore,
+        indicator: any ControlIndicatorPresenting = NullControlIndicator()
+    ) -> HostController {
+        let app = ApplicationDescriptor(
+            bundleIdentifier: windows[0].identity.bundleIdentifier,
+            name: "Remembered Target",
+            processID: windows[0].identity.processID,
+            bundleURLPath: "/Applications/Remembered Target.app",
+            windows: windows,
+            isProtected: false
+        )
+        return HostController(
+            capture: ProgressiveCaptureServiceFixture(
+                application: app,
+                visibleAfterInventoryCall: 1
+            ),
+            accessibility: GrantingAccessibilityFixture(),
+            permissions: GrantedPermissionFixture(),
+            accessPresenter: presenter,
+            indicator: indicator,
+            consentStore: consentStore
+        )
+    }
+
+    private func requester(
+        bundleIdentifier: String = "com.example.approved-harness",
+        signingIdentity: String = String(repeating: "f", count: 64)
+    ) -> PeerIdentity {
+        PeerIdentity(
+            uid: UInt32(getuid()),
+            processID: 9_900,
+            name: "remembered-access-harness",
+            instanceID: UUID().uuidString,
+            harnessProcessID: 90_001,
+            harnessBundleIdentifier: bundleIdentifier,
+            harnessSigningIdentity: signingIdentity,
+            harnessProcessStartTimeUnixMs: 1_700_000_001_000,
+            harnessIdentityVerified: true
+        )
+    }
+
+    private func makeConnection(peer: PeerIdentity) -> ConnectionRecord {
+        let now = Date()
+        return ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "t", count: 43),
+            peer: peer,
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+    }
+
+    private func context(_ requestID: String, connection: ConnectionRecord) -> HostRequestContext {
+        HostRequestContext(
+            requestID: requestID,
+            connection: connection,
+            deadline: Date().addingTimeInterval(10)
+        )
+    }
+
+    private func windowRequest(
+        bundleIdentifier: String,
+        windowHint: String? = nil,
+        capabilities: Set<PublicCapability> = [.observe]
+    ) -> JSONValue {
+        var target: [String: JSONValue] = [
+            "kind": .string("window"),
+            "app": .object([
+                "kind": .string("bundle_id"),
+                "value": .string(bundleIdentifier),
+            ]),
+            "launchIfNeeded": .bool(false),
+        ]
+        if let windowHint { target["windowHint"] = .string(windowHint) }
+        return .object([
+            "target": .object(target),
+            "reason": .string("Inspect the remembered fixture"),
+            "capabilities": .array(
+                capabilities.sorted { $0.rawValue < $1.rawValue }.map { .string($0.rawValue) }
+            ),
+            "timeoutMs": .number(5_000),
+        ])
+    }
+
+    private func displayRequest() -> JSONValue {
+        .object([
+            "target": .object([
+                "kind": .string("display"),
+                "displayId": .string("display-42"),
+            ]),
+            "reason": .string("Inspect the selected display"),
+            "capabilities": .array([.string("observe")]),
+            "timeoutMs": .number(5_000),
+        ])
+    }
+}
+
 @Suite("Privacy, audit, and protected targets", .serialized)
 struct PrivacyAndPolicyTests {
     @Test func windowCaptureIsReleasedOnlyAfterAnUnchangedUnprotectedPostcheck() throws {
@@ -3042,6 +3412,29 @@ private struct LaunchAcceptingPresenterFixture: AccessApprovalPresenting {
     }
 }
 
+private actor RecordingAccessPresenterFixture: AccessApprovalPresenting {
+    private let persistence: GrantPersistence
+    private var observedRequests: [AccessApprovalRequest] = []
+
+    init(persistence: GrantPersistence) {
+        self.persistence = persistence
+    }
+
+    func requestApproval(
+        _ request: AccessApprovalRequest,
+        cancellation: any InteractionCancellationChecking
+    ) async -> AccessApprovalDecision {
+        observedRequests.append(request)
+        return AccessApprovalDecision(
+            selected: request.candidates.first,
+            persistence: persistence
+        )
+    }
+
+    func requestCount() -> Int { observedRequests.count }
+    func requests() -> [AccessApprovalRequest] { observedRequests }
+}
+
 private actor CancellationObservingPresenterFixture: AccessApprovalPresenting {
     private var presented = false
     private(set) var observedCancellation = false
@@ -3193,6 +3586,105 @@ private actor FixtureWireHandler: HostMethodHandling {
 
 @Suite("Secure value-write approval dispatch")
 struct SecureValueWriteApprovalDispatchTests {
+    @Test func defaultGrantScopedPolicyDispatchesHighRiskWriteWithoutActionPrompt() async throws {
+        let window = try makeWindow(
+            id: 9_881,
+            bundle: "com.example.grant-scoped-fixture",
+            title: "Grant Scoped Fixture"
+        )
+        let accessibility = SecureWriteAccessibilityFixture()
+        let controller = HostController(
+            capture: try SecureWriteCaptureFixture(window: window),
+            accessibility: accessibility,
+            permissions: GrantedPermissionFixture(),
+            syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
+            accessPresenter: LaunchAcceptingPresenterFixture()
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "g", count: 43),
+            peer: verifiedTestHarnessPeer(
+                processID: 9_880,
+                name: "grant-scoped-test-harness",
+                instanceID: "grant-scoped-test"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        func context(_ requestID: String) -> HostRequestContext {
+            HostRequestContext(
+                requestID: requestID,
+                connection: connection,
+                deadline: Date().addingTimeInterval(10)
+            )
+        }
+
+        let access = try await controller.handle(
+            method: "requestAccess",
+            params: .object([
+                "target": .object([
+                    "kind": .string("window"),
+                    "app": .object([
+                        "kind": .string("bundle_id"),
+                        "value": .string(window.identity.bundleIdentifier),
+                    ]),
+                    "launchIfNeeded": .bool(false),
+                ]),
+                "reason": .string("Test grant-scoped action authorization"),
+                "capabilities": .array([.string("observe"), .string("interact")]),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("grant-scoped-access")
+        )
+        let grantID = try #require(
+            access.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+        let state = try await controller.handle(
+            method: "getState",
+            params: .object([
+                "grantId": .string(grantID.uuidString),
+                "screenshot": .string("none"),
+                "maxWidthPx": .number(1_024),
+                "includeAccessibility": .bool(true),
+                "maxAccessibilityChars": .number(10_000),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("grant-scoped-state")
+        )
+        let frameID = try #require(
+            state.objectValue?["frameId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+        let completed = try await controller.handle(
+            method: "action",
+            params: .object([
+                "kind": .string("setValue"),
+                "grantId": .string(grantID.uuidString),
+                "frameId": .string(frameID.uuidString),
+                "intent": .string("Fill the exact secure fixture field"),
+                "approvalMode": .string("elicitation"),
+                "timeoutMs": .number(5_000),
+                "selector": .object([
+                    "kind": .string("element"),
+                    "elementId": .string("element-1"),
+                ]),
+                "value": .string("grant-authorized-value"),
+            ]),
+            context: context("grant-scoped-action")
+        )
+
+        #expect(completed.objectValue?["status"] == .string("completed"))
+        #expect(await accessibility.performedCommands() == [
+            .setValue(
+                nodeID: 1,
+                value: "grant-authorized-value",
+                authorization: .approvedDirectSecure
+            ),
+        ])
+    }
+
     @Test func exactApprovedRetryDispatchesOnlyTheApprovedSecureWrite() async throws {
         let window = try makeWindow(
             id: 9_901,
@@ -3204,6 +3696,7 @@ struct SecureValueWriteApprovalDispatchTests {
         let controller = HostController(
             capture: capture,
             accessibility: accessibility,
+            actionApprovalPolicy: .riskBased,
             permissions: GrantedPermissionFixture(),
             syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
             accessPresenter: LaunchAcceptingPresenterFixture()
@@ -3548,6 +4041,7 @@ struct SecureValueWriteApprovalDispatchTests {
             let controller = HostController(
                 capture: try SecureWriteCaptureFixture(window: window),
                 accessibility: accessibility,
+                actionApprovalPolicy: .riskBased,
                 permissions: GrantedPermissionFixture(),
                 syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
                 accessPresenter: LaunchAcceptingPresenterFixture()

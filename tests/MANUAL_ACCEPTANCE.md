@@ -35,7 +35,7 @@ an installed source candidate produced by `setup`:
    request off again, and confirm the current process latches control off and
    Emergency-Stops even though durable persistence failed;
 9. relaunch and confirm the switch remains off after a successful write while
-   remembered app decisions remain listed;
+   always-allowed app policies remain listed;
 10. replace the preference file with each unsafe case covered by unit tests
    (wrong mode, symbolic link, invalid schema, malformed data) in an isolated
    runtime and confirm startup or policy evaluation fails closed rather than
@@ -81,7 +81,7 @@ Record the installed version and result for each current client:
 | Claude Desktop or Claude Code | stdio MCP configuration and its advertised approval route |
 | Cursor | stdio MCP configuration and its advertised approval route |
 | MCP Inspector | interactive stdio tool calls and its advertised approval route |
-| Minimal no-elicitation client | native one-shot approval/retry fallback |
+| Minimal no-elicitation client | grant-scoped action flow without elicitation |
 
 For every row, complete this sequence on a fresh MCP connection:
 
@@ -99,14 +99,22 @@ For every row, complete this sequence on a fresh MCP connection:
 7. press the native **Stop** control and verify capture and action calls fail;
 8. disconnect and verify the host reports no grant from that connection.
 
-For one window run, select **Remember this verified app identity for future
-requests**, stop the grant, and start a new request. Confirm the remembered
-signed app identity never preselects or automatically grants a window: the native
-exact-window choice remains mandatory even when there is only one candidate. In
-**Computer Control Settings…**, verify the app entry and capability summary,
-remove that row, and confirm the next request needs a fresh app decision. Repeat
-with two entries and verify confirmed Remove All clears both without changing an
-already active grant.
+For one window run, select **Always Allow App**, stop the grant, and start a new
+explicit request from the same verified client with the same capabilities. With
+only one safe matching window, confirm the host creates a fresh exact-window,
+connection-bound grant without another app prompt and still presents the rail.
+Open the fixture's second window and repeat without a unique hint; confirm the
+exact-window picker returns. Also confirm a different verified client,
+capability escalation, or changed target signing identity prompts instead of
+reusing the policy. In **Computer Control Settings… → Always-allowed apps**,
+verify both requester and target context plus the capability summary, remove the
+row, and confirm the next request needs a fresh decision. Repeat with two entries
+for different verified clients and confirm removing one preserves the other;
+then verify confirmed Remove All clears both without changing an active grant.
+Confirm `launch_if_needed` still has its separate launch approval even when the
+target policy is saved. When upgrading a consent file created under the older
+prompt-every-window behavior, confirm it still prompts until a new explicit
+**Always Allow App** decision is made.
 
 At least one run must also exercise the separately approved session-only display
 grant, confirm protected applications and the rail are absent from the capture,
@@ -122,7 +130,7 @@ implementation exists. It must not silently switch to a private/background path.
 Across the hardware matrix, explicitly cover Retina and mixed-scale displays,
 negative display origins, window move/resize, full-screen, Stage Manager, and
 multiple Spaces. A display grant must remain session-only after every relaunch
-and must never appear in remembered app access.
+and must never appear in Always-allowed apps.
 
 ## Evidence and release binding
 

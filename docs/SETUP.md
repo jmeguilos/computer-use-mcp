@@ -119,10 +119,14 @@ disable SIP, run a `tccutil` database modification, grant Full Disk Access, or
 install a kernel/system extension.
 
 TCC permission is app-wide. Per-window access begins only when an MCP client
-calls `computer_request_access` and you approve the native target picker.
-Remembering a signed application changes only its future app decision: every new
-grant still requires an exact window choice. Display approval is separate,
-session-only, and never remembered.
+calls `computer_request_access`. A first or unmatched request requires the
+native exact-target picker. **Always Allow App** can satisfy a later explicit
+request only for the same verified requester, signed target, and approved
+capability subset when exactly one safe Accessibility-bound window matches.
+Ambiguity, requester or target-signature changes, and capability escalation
+prompt again. Application launch remains a separate approval; display approval
+is session-only and never remembered. Legacy consent records remain prompt-only
+until the user makes a new explicit Always Allow decision.
 
 On the normal bridge path, caller-supplied names and instance IDs are discarded.
 The bridge attributes each connection to the nearest verifiable GUI process
@@ -187,11 +191,15 @@ It opens windows titled **Computer Use MCP Fixture — Primary** and
    verify the acting state; and
 7. press **Stop**, then confirm a new state/action call is denied.
 
-If you select **Remember this verified app identity for future requests**, end
-the grant and request access again. The host must still require the exact Primary
-window. Confirm that the app appears in **Computer Control Settings… → Remembered
-app access**, then test its per-row Remove control. A display request must offer
-session-only approval and disappear when stopped or disconnected.
+If you select **Always Allow App**, end the grant and request access again from
+the same verified client. With only the Primary window matching, the host should
+create a fresh exact-window grant without another app prompt and still show the
+control rail. Launch the Inspector window and repeat without a unique hint; the
+native exact-window picker must return. Confirm the policy appears in **Computer
+Control Settings… → Always-allowed apps**, then test its per-row Remove control.
+A request from another client, a capability escalation, or a changed app signing
+identity must prompt again. A display request must offer session-only approval
+and disappear when stopped or disconnected.
 
 Stop is the v1 human-takeover boundary. The host does not monitor global keyboard
 or pointer input, so manually clicking or typing is not an atomic pause. Press
@@ -223,6 +231,11 @@ console, messaging app, or a window containing customer data.
 
 - Recheck Screen Recording in System Settings.
 - Fully quit and relaunch the native host after changing the permission.
+- Source-development builds use an ad-hoc signature whose code identity changes
+  when the executable changes. If `doctor` reports a permission denied while the
+  installed host's toggle appears on, remove that stale host row, add the exact
+  installed `~/Applications/ComputerUseMCPHost.app` again, enable it, and relaunch
+  the host. This does not apply to a stable Developer ID-signed distribution.
 - Protected or DRM-backed content may remain unavailable by design.
 - Lock-screen capture is denied by design.
 

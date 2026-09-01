@@ -18,6 +18,19 @@ public enum RiskTier: String, Codable, Comparable, Sendable {
     public static func < (lhs: RiskTier, rhs: RiskTier) -> Bool { lhs.rank < rhs.rank }
 }
 
+/// Determines whether a valid target grant is sufficient authority for an
+/// action, or whether elevated-risk actions also require a one-shot prompt.
+///
+/// The product default is grant-scoped authorization: the user approves the
+/// window/display and capabilities once, and actions remain authorized until
+/// that grant is revoked. Risk classification is still retained for audit and
+/// hard-block decisions. The legacy risk-based mode remains available for
+/// deployments that explicitly require per-action confirmation.
+public enum ActionApprovalPolicy: String, Codable, Sendable {
+    case grantScoped = "grant_scoped"
+    case riskBased = "risk_based"
+}
+
 public struct RiskChallenge: Codable, Equatable, Sendable {
     public let id: UUID
     public var approvalRequestID: UUID { id }

@@ -102,8 +102,9 @@ public struct LaunchApprovalRequest: Sendable {
 
 public protocol AccessApprovalPresenting: Sendable {
     /// Separate consent boundary for a state-changing launch. This happens
-    /// before NSWorkspace is asked to start an absent application; the later
-    /// exact-window picker remains mandatory.
+    /// before NSWorkspace is asked to start an absent application. Launch never
+    /// grants control; later resolution still requires either native exact-
+    /// window selection or a matching unique-window Always Allow policy.
     func requestLaunchApproval(
         _ request: LaunchApprovalRequest,
         cancellation: any InteractionCancellationChecking
@@ -527,7 +528,7 @@ public enum ElementClickFallbackPolicy {
         error == .actionUnsupported
     }
 
-    /// Approval and risk classification were bound to this descriptor before
+    /// Frame authority and risk classification were bound to this descriptor before
     /// execution. Reordering an action list is harmless; all semantic fields
     /// and the frame must otherwise remain exactly the same.
     public static func isSameBoundTarget(
@@ -598,6 +599,7 @@ public actor HostController: HostMethodHandling {
     private let locks: ControllerLockStore
     private let actionGate: ActionExecutionGate
     private let risks: RiskApprovalStore
+    private let actionApprovalPolicy: ActionApprovalPolicy
     private let permissions: SystemPermissionChecking
     private let controlPolicy: HostControlPolicyChecking
     private let protectedPolicy: ProtectedProcessPolicy
@@ -613,6 +615,7 @@ public actor HostController: HostMethodHandling {
     private var grantMetadata: [UUID: GrantedMetadata] = [:]
     private var publishedGrantIDs: Set<UUID> = []
     private var lastAccessibilityRevision: [UUID: UInt64] = [:]
+    private var maintenanceIdentityMissCounts: [UUID: Int] = [:]
     private var revokingConnections: Set<UUID> = []
 
     public init(
@@ -626,6 +629,7 @@ public actor HostController: HostMethodHandling {
         locks: ControllerLockStore = ControllerLockStore(),
         actionGate: ActionExecutionGate = ActionExecutionGate(),
         risks: RiskApprovalStore = RiskApprovalStore(),
+        actionApprovalPolicy: ActionApprovalPolicy = .grantScoped,
         permissions: SystemPermissionChecking = MacSystemPermissionChecker(),
         controlPolicy: HostControlPolicyChecking = AlwaysEnabledHostControlPolicy(),
         protectedPolicy: ProtectedProcessPolicy = ProtectedProcessPolicy(),
@@ -651,6 +655,7 @@ public actor HostController: HostMethodHandling {
         self.locks = locks
         self.actionGate = actionGate
         self.risks = risks
+        self.actionApprovalPolicy = actionApprovalPolicy
         self.permissions = permissions
         self.controlPolicy = controlPolicy
         self.protectedPolicy = protectedPolicy
@@ -695,6 +700,7 @@ public actor HostController: HostMethodHandling {
             grantMetadata.removeValue(forKey: id)
             publishedGrantIDs.remove(id)
             lastAccessibilityRevision.removeValue(forKey: id)
+            maintenanceIdentityMissCounts.removeValue(forKey: id)
         }
         await risks.revoke(connectionID: connectionID)
         await locks.revoke(connectionID: connectionID)
@@ -712,6 +718,7 @@ public actor HostController: HostMethodHandling {
         grantMetadata.removeAll()
         publishedGrantIDs.removeAll()
         lastAccessibilityRevision.removeAll()
+        maintenanceIdentityMissCounts.removeAll()
         await locks.revokeAll()
         await indicator.hideAll()
     }
@@ -725,6 +732,7 @@ public actor HostController: HostMethodHandling {
     public func stop(grantID: UUID) async {
         stopToken.stop(grantID: grantID)
         guard let grant = await grants.revoke(grantID: grantID) else {
+            maintenanceIdentityMissCounts.removeValue(forKey: grantID)
             await indicator.hide(grantID: grantID)
             return
         }
@@ -736,6 +744,7 @@ public actor HostController: HostMethodHandling {
         grantMetadata.removeValue(forKey: grantID)
         publishedGrantIDs.remove(grantID)
         lastAccessibilityRevision.removeValue(forKey: grantID)
+        maintenanceIdentityMissCounts.removeValue(forKey: grantID)
         await indicator.hide(grantID: grantID)
     }
 
@@ -752,6 +761,7 @@ public actor HostController: HostMethodHandling {
             grantMetadata.removeValue(forKey: grant.id)
             publishedGrantIDs.remove(grant.id)
             lastAccessibilityRevision.removeValue(forKey: grant.id)
+            maintenanceIdentityMissCounts.removeValue(forKey: grant.id)
         }
 
         let activeGrants = await grants.active(now: now).filter {
@@ -772,28 +782,63 @@ public actor HostController: HostMethodHandling {
         )
         for grant in activeGrants {
             let isCurrent: Bool
+            let mayBeTransient: Bool
             switch grant.scope {
             case .window(let expected):
                 let candidates = currentByWindowID[expected.windowID] ?? []
                 if let current = candidates.first(where: { $0.identity == expected }),
                    protectedPolicy.evaluate(current).allowed {
-                    isCurrent = (try? await accessibility.validateWindowBinding(
-                        sessionID: grant.id,
-                        window: current
-                    )) != nil
+                    do {
+                        try await accessibility.validateWindowBinding(
+                            sessionID: grant.id,
+                            window: current
+                        )
+                        isCurrent = true
+                        mayBeTransient = false
+                    } catch let error as AccessibilityError {
+                        isCurrent = false
+                        // AX may briefly omit or ambiguously report the same
+                        // WindowServer target during a focus/Space transition.
+                        // A concrete binding change or permission/session
+                        // failure is positive revocation evidence.
+                        mayBeTransient = error == .windowNotFound || error == .windowMappingAmbiguous
+                    } catch {
+                        isCurrent = false
+                        mayBeTransient = false
+                    }
                 } else {
                     isCurrent = false
+                    // SCShareableContent includes hidden, minimized, and
+                    // other-Space windows. Absence, a reused numeric ID, or a
+                    // newly protected target is therefore positive revocation
+                    // evidence. Only transient AX mapping of an otherwise
+                    // present exact WindowServer target receives a grace bound.
+                    mayBeTransient = false
                 }
             case .display(let expected):
                 // A display grant is bound to the approved geometry, scale,
                 // mirroring state, and main-display state. Reconfiguration is
                 // a new target boundary even when CoreGraphics reuses the ID.
                 isCurrent = inventory.displays.contains(expected)
+                mayBeTransient = false
             }
-            guard isCurrent else {
+            if isCurrent {
+                maintenanceIdentityMissCounts.removeValue(forKey: grant.id)
+                continue
+            }
+            guard mayBeTransient else {
                 await stop(grantID: grant.id)
                 continue
             }
+            // WindowServer and Accessibility can each produce one transient
+            // miss during focus, Space, or visibility transitions. Action-time
+            // validation remains immediate and fail-closed; maintenance waits
+            // for three consecutive corroborating misses before revoking the
+            // visible grant.
+            let missCount = min(3, maintenanceIdentityMissCounts[grant.id, default: 0] + 1)
+            maintenanceIdentityMissCounts[grant.id] = missCount
+            guard missCount >= 3 else { continue }
+            await stop(grantID: grant.id)
         }
     }
 
@@ -819,6 +864,7 @@ public actor HostController: HostMethodHandling {
             "nativeVersion": .string("0.1.0-alpha.1"),
             "platform": .string("macos"),
             "appControlEnabled": .bool(appControlEnabled),
+            "actionAuthorization": .string(actionApprovalPolicy.rawValue),
             "permissions": .object([
                 "accessibility": .string(snapshot.accessibility.publicName),
                 "screenRecording": .string(snapshot.screenCapture.publicName),
@@ -1065,31 +1111,45 @@ public actor HostController: HostMethodHandling {
         if !isDisplay {
             for choice in choices {
                 if case .window(let window) = choice.scope,
-                   await consentStore?.allows(window: window, capabilities: request.capabilities) == true {
+                   await consentStore?.allowsAutoGrantUniqueWindow(
+                       requester: context.connection.peer,
+                       window: window,
+                       capabilities: request.capabilities
+                   ) == true {
                     appConsentExists = true
                     break
                 }
             }
         }
-        // Persistent app consent never selects a concrete window. The native
-        // picker is shown for every new grant, including a newly created sole window.
-        let decision = await withTaskCancellationHandler {
-            await accessPresenter.requestApproval(
-                AccessApprovalRequest(
-                    connectionID: context.connection.id,
-                    requesterName: context.connection.peer.name,
-                    applicationName: presentationApplicationName,
-                    bundleIdentifier: presentationBundleIdentifier,
-                    reason: request.reason,
-                    candidates: choices,
-                    capabilities: request.capabilities,
-                    displayTarget: isDisplay,
-                    appConsentExists: appConsentExists
-                ),
-                cancellation: requestCancellation
+        // Always Allow App can satisfy only a later explicit request that has
+        // already resolved to one safe, Accessibility-bound exact window. It
+        // never grants ambient app authority, selects among multiple windows,
+        // covers displays, or widens the capability ceiling.
+        let decision: AccessApprovalDecision
+        if appConsentExists, choices.count == 1, !isDisplay {
+            decision = AccessApprovalDecision(
+                selected: choices[0],
+                persistence: .alwaysAllowApp
             )
-        } onCancel: {
-            requestCancellation.cancel()
+        } else {
+            decision = await withTaskCancellationHandler {
+                await accessPresenter.requestApproval(
+                    AccessApprovalRequest(
+                        connectionID: context.connection.id,
+                        requesterName: context.connection.peer.name,
+                        applicationName: presentationApplicationName,
+                        bundleIdentifier: presentationBundleIdentifier,
+                        reason: request.reason,
+                        candidates: choices,
+                        capabilities: request.capabilities,
+                        displayTarget: isDisplay,
+                        appConsentExists: appConsentExists
+                    ),
+                    cancellation: requestCancellation
+                )
+            } onCancel: {
+                requestCancellation.cancel()
+            }
         }
         // Native UI is intentionally asynchronous. The caller may have timed
         // out, cancelled, or disconnected while the sheet was visible; never
@@ -1187,8 +1247,14 @@ public actor HostController: HostMethodHandling {
             try requestCancellation.check()
             try pendingGrantCancellation.check()
             try await requireAppControlEnabled()
-            if persistence == .alwaysAllowApp, case .window(let window) = choice.scope {
-                try await consentStore?.record(window: window, capabilities: request.capabilities)
+            if persistence == .alwaysAllowApp,
+               !appConsentExists,
+               case .window(let window) = choice.scope {
+                try await consentStore?.recordAutoGrantUniqueWindow(
+                    requester: context.connection.peer,
+                    window: window,
+                    capabilities: request.capabilities
+                )
                 try check(context)
                 try requestCancellation.check()
                 try pendingGrantCancellation.check()
@@ -1253,6 +1319,7 @@ public actor HostController: HostMethodHandling {
         grantMetadata.removeValue(forKey: request.grantID)
         publishedGrantIDs.remove(request.grantID)
         lastAccessibilityRevision.removeValue(forKey: request.grantID)
+        maintenanceIdentityMissCounts.removeValue(forKey: request.grantID)
         await indicator.hide(grantID: request.grantID)
         return .object(["status": .string(status), "grantId": .string(request.grantID.uuidString)])
     }
@@ -1468,13 +1535,20 @@ public actor HostController: HostMethodHandling {
                 request: request,
                 grantID: grant.id
             )
+            let elementEnabled = await semanticElementEnabled(
+                request: request,
+                grantID: grant.id,
+                frameID: frame.frameID
+            )
             classifiedRisk = RiskClassifier.classify(
                 request: request,
-                element: elementDescriptor
+                element: elementDescriptor,
+                elementEnabled: elementEnabled
             )
-            // The one-shot approval is bound to both the wire action and the
-            // resolved semantic target. A relabelled/replaced control cannot
-            // consume approval issued for the earlier frame semantics.
+            // The action digest binds the wire action to its resolved semantic
+            // target for audit, frame checks, and the optional legacy risk-based
+            // policy. A relabelled/replaced control cannot reuse earlier frame
+            // semantics.
             let bindsFocusedElementFrame = request.selector == nil
                 && (request.text != nil || request.value != nil)
             let digest = try actionDigest(
@@ -1496,7 +1570,10 @@ public actor HostController: HostMethodHandling {
             let mapped = WireErrorMapping.map(error)
             let result: AuditResult
             if mapped.code == "CANCELLED" { result = .canceled }
-            else if mapped.code == "approval_required" || mapped.code.hasPrefix("APPROVAL_") || mapped.code == "ACCESS_DENIED" {
+            else if mapped.code == "approval_required"
+                || mapped.code.hasPrefix("APPROVAL_")
+                || mapped.code == "ACCESS_DENIED"
+                || mapped.code == "action_blocked" {
                 result = .denied
             } else { result = .failed }
             do {
@@ -1527,14 +1604,22 @@ public actor HostController: HostMethodHandling {
         frame: FrameResource,
         grant: AccessGrant
     ) async throws -> JSONValue {
-        let approvalSummary = RiskApprovalSummaryBuilder.summary(
-            request: request,
-            target: grantMetadata[grant.id]?.target ?? .object([:]),
-            harnessName: context.connection.peer.name,
-            element: elementDescriptor
-        )
-        var approvalConsumed = false
-        if riskTier > .low {
+        if riskTier == .blocked {
+            throw WireError(code: "action_blocked", message: "Action is blocked by host safety policy")
+        }
+
+        // A grant-scoped session is the user's authorization for every
+        // capability approved in the native picker. This avoids interrupting
+        // the user before each action while keeping target, frame, capability,
+        // process-identity, protected-surface, and Stop checks in force.
+        var sensitiveWriteAuthorized = actionApprovalPolicy == .grantScoped
+        if actionApprovalPolicy == .riskBased, riskTier > .low {
+            let approvalSummary = RiskApprovalSummaryBuilder.summary(
+                request: request,
+                target: grantMetadata[grant.id]?.target ?? .object([:]),
+                harnessName: context.connection.peer.name,
+                element: elementDescriptor
+            )
             if let approvalID = request.approvalRequestID {
                 guard await risks.consumeApproved(
                     approvalRequestID: approvalID,
@@ -1542,7 +1627,7 @@ public actor HostController: HostMethodHandling {
                     actionDigest: digest,
                     approvalMode: request.approvalMode
                 ) else { throw WireError(code: "approval_invalid", message: "Approval is expired, mismatched or consumed") }
-                approvalConsumed = true
+                sensitiveWriteAuthorized = true
             } else {
                 let authorization = await risks.authorize(
                     connectionID: context.connection.id,
@@ -1645,7 +1730,7 @@ public actor HostController: HostMethodHandling {
         }
         let relayedCancellation = RelayedInteractionCancellation(base: actionCancellation)
         do {
-            // Approval can outlive the frame it described. Once both the
+            // A grant can outlive the frame it described. Once both the
             // per-grant and global-input leases are held, require that exact
             // frame to still be current before any semantic re-resolution or
             // dispatch. getState uses the same per-grant lease.
@@ -1661,7 +1746,7 @@ public actor HostController: HostMethodHandling {
                     grant: grant,
                     frame: frame,
                     expectedSemanticTarget: elementDescriptor,
-                    approvalConsumed: approvalConsumed,
+                    sensitiveWriteAuthorized: sensitiveWriteAuthorized,
                     context: context,
                     cancellation: relayedCancellation
                 )
@@ -1721,7 +1806,7 @@ public actor HostController: HostMethodHandling {
         grant: AccessGrant,
         frame: FrameResource,
         expectedSemanticTarget: AccessibilityActionDescriptor?,
-        approvalConsumed: Bool,
+        sensitiveWriteAuthorized: Bool,
         context: HostRequestContext,
         cancellation baseCancellation: InteractionCancellationChecking
     ) async throws {
@@ -1731,9 +1816,9 @@ public actor HostController: HostMethodHandling {
         )
         try check(context)
         try cancellation.check()
-        // Approval can remain open while the target changes. Revalidate after
-        // approval and immediately before dispatch, not only when the request
-        // first enters the action pipeline.
+        // A grant can remain open while the target changes. Revalidate
+        // immediately before dispatch, not only when the request first enters
+        // the action pipeline.
         try await revalidate(grant: grant, frame: frame)
         if case .window = grant.scope,
            frame.accessibilityRevision != lastAccessibilityRevision[grant.id] {
@@ -1827,7 +1912,7 @@ public actor HostController: HostMethodHandling {
                         } catch let error as AccessibilityError where
                             ElementClickFallbackPolicy.permitsFallback(after: error) {
                             // Continue into the same action's frame-, grant-,
-                            // risk-, and approval-bound public fallback.
+                            // risk-, and semantic-target-bound public fallback.
                         }
                     }
                     try await clickElementCoordinateFallback(
@@ -2001,11 +2086,11 @@ public actor HostController: HostMethodHandling {
                 if expectedSemanticTarget.secure {
                     // Secure descendants and protected content never inherit
                     // the direct-field exception. This fact comes from the
-                    // exact descriptor in the approved action digest.
+                    // exact descriptor bound into the action digest.
                     guard AccessibilityProjection.isDirectSecureTextField(
                         role: expectedSemanticTarget.role,
                         subrole: expectedSemanticTarget.subrole
-                    ), approvalConsumed else {
+                    ), sensitiveWriteAuthorized else {
                         throw AccessibilityError.secureElement
                     }
                     authorization = .approvedDirectSecure
@@ -2120,7 +2205,7 @@ public actor HostController: HostMethodHandling {
             try check(context)
             try cancellation.check()
             // Focus can change layout. Revalidate window geometry and the
-            // approval-bound AX element again immediately before CGEvent.
+            // frame-bound AX element again immediately before CGEvent.
             try await revalidate(grant: grant, frame: frame)
             let finalDescriptor = try await accessibility.describeActionTarget(
                 sessionID: grant.id,
@@ -2405,6 +2490,29 @@ public actor HostController: HostMethodHandling {
             sessionID: grantID,
             revision: revision
         )
+    }
+
+    /// Returns only the enabled state bound to the exact frame that supplied an
+    /// element selector or one unambiguous focused text target. Unknown,
+    /// omitted, or ambiguous state stays nil and cannot qualify for a low-risk
+    /// semantic fast path.
+    private func semanticElementEnabled(
+        request: HostActionRequest,
+        grantID: UUID,
+        frameID: UUID
+    ) async -> Bool? {
+        guard let state = await accessibilitySnapshots.state(
+            grantID: grantID,
+            frameID: frameID
+        ) else { return nil }
+        if case .element(let opaque)? = request.selector,
+           let resolvedID = try? nodeID(opaque) {
+            return state.nodes.first(where: { $0.id == resolvedID })?.isEnabled
+        }
+        guard request.text != nil || request.value != nil else { return nil }
+        let focused = state.nodes.filter(\.isFocused)
+        guard focused.count == 1 else { return nil }
+        return focused[0].isEnabled
     }
 
     private func semanticTargetMatches(
@@ -2697,17 +2805,22 @@ public enum RiskClassifier {
     /// risk implied by the resolved control or by the action payload shape.
     public static func classify(
         request: HostActionRequest,
-        element: AccessibilityActionDescriptor?
+        element: AccessibilityActionDescriptor?,
+        elementEnabled: Bool? = nil
     ) -> RiskTier {
         classify(
             kind: request.kind,
             intent: request.intent,
+            selector: request.selector,
+            mouseButton: request.mouseButton,
+            clickCount: request.clickCount,
             key: request.key,
             modifiers: request.modifiers ?? [],
             text: request.text,
             value: request.value,
             semanticAction: request.action,
-            element: element
+            element: element,
+            elementEnabled: elementEnabled
         )
     }
 
@@ -2722,29 +2835,38 @@ public enum RiskClassifier {
         classify(
             kind: kind,
             intent: intent,
+            selector: nil,
+            mouseButton: nil,
+            clickCount: nil,
             key: key,
             modifiers: modifiers,
             text: nil,
             value: nil,
             semanticAction: nil,
-            element: nil
+            element: nil,
+            elementEnabled: nil
         )
     }
 
     private static func classify(
         kind: HostActionKind,
         intent: String,
+        selector: ActionSelector?,
+        mouseButton: String?,
+        clickCount: Int?,
         key: String?,
         modifiers: [String],
         text: String?,
         value: String?,
         semanticAction: String?,
-        element: AccessibilityActionDescriptor?
+        element: AccessibilityActionDescriptor?,
+        elementEnabled: Bool?
     ) -> RiskTier {
         let controlEvidence = (element?.semanticMetadata ?? [])
             + (element?.actions ?? [])
             + [semanticAction].compactMap { $0 }
         let nonPayloadEvidence = normalizedEvidence([intent] + controlEvidence)
+        let controlOnlyEvidence = normalizedEvidence(controlEvidence)
 
         if containsAnyPhrase(blockedPhrases, in: nonPayloadEvidence) {
             return .blocked
@@ -2774,10 +2896,22 @@ public enum RiskClassifier {
             return .high
         }
 
+        if kind == .pressKey, isBenignNavigationKey(key, modifiers: modifiers) {
+            return .low
+        }
+
         if isClearlyBenignSemanticAction(
             kind: kind,
+            selector: selector,
+            mouseButton: mouseButton,
+            clickCount: clickCount,
             requestedAction: semanticAction,
-            element: element
+            element: element,
+            elementEnabled: elementEnabled,
+            affirmativelyBenign: containsAnyPhrase(
+                benignInteractionPhrases,
+                in: controlOnlyEvidence
+            )
         ) {
             return .low
         }
@@ -2823,8 +2957,9 @@ public enum RiskClassifier {
         // Credentials, identity and sensitive-data handling.
         "credential", "password", "passcode", "one time code", "verification code",
         "recovery code", "security code", "authentication code", "api key", "private key",
-        "secret", "username", "user name", "otp", "mfa", "two factor", "2fa", "pin",
-        "sign in", "log in", "verify identity", "social security", "passport",
+        "secret", "otp", "mfa", "two factor", "2fa", "pin",
+        "sign in", "log in", "login", "auth", "authenticate", "authentication",
+        "verify identity", "social security", "passport",
         "confidential", "sensitive", "sensitive data",
         // Medical actions and protected health information.
         "medical", "prescription", "diagnosis", "treatment", "medication", "dosage",
@@ -2839,7 +2974,21 @@ public enum RiskClassifier {
         "delete", "erase", "remove", "submit", "send", "publish", "message",
         "communicat", "payment", "purchase", "checkout", "upload", "install",
         "uninstall", "permission", "authorize", "credential", "password",
-        "passcode", "secret", "sensitive", "medical", "prescrib", "diagnosis", "transmit",
+        "passcode", "secret", "login", "authenticat", "sensitive", "medical",
+        "prescrib", "diagnosis", "transmit",
+    ]
+
+    /// A missing consequential keyword is not proof of safety: applications
+    /// can expose generic labels such as Confirm or Continue. Generic AXPress
+    /// and mutation fast paths therefore require affirmative, non-payload
+    /// evidence of a routine navigation, fixture, search, or draft/profile
+    /// operation. Unknown semantics retain the confirmation floor.
+    private static let benignInteractionPhrases = [
+        "harmless", "fixture", "search", "filter", "find", "query",
+        "username", "user name", "display name", "profile", "note", "draft",
+        "expand", "collapse", "show details", "hide details", "refresh", "reload",
+        "go back", "go forward", "previous", "next", "open", "close", "cancel",
+        "toggle", "increment", "decrement", "play", "pause",
     ]
 
     private static func normalizedEvidence(_ values: [String]) -> NormalizedEvidence {
@@ -2880,8 +3029,13 @@ public enum RiskClassifier {
 
     private static func isClearlyBenignSemanticAction(
         kind: HostActionKind,
+        selector: ActionSelector?,
+        mouseButton: String?,
+        clickCount: Int?,
         requestedAction: String?,
-        element: AccessibilityActionDescriptor?
+        element: AccessibilityActionDescriptor?,
+        elementEnabled: Bool?,
+        affirmativelyBenign: Bool
     ) -> Bool {
         guard let element, !element.secure else { return false }
         let role = element.role.lowercased()
@@ -2889,7 +3043,30 @@ public enum RiskClassifier {
         case .selectText:
             return role.contains("text") || role == "axwebarea"
         case .click:
-            return ["axdisclosuretriangle", "axscrollbar"].contains(role)
+            guard case .element? = selector,
+                  elementEnabled == true,
+                  (mouseButton ?? "left") == "left",
+                  (clickCount ?? 1) == 1,
+                  element.semanticLabel != nil else { return false }
+            let intrinsicallyNavigational = ["axdisclosuretriangle", "axscrollbar"].contains(role)
+            return (intrinsicallyNavigational || affirmativelyBenign)
+                && element.actions.contains { $0.caseInsensitiveCompare("AXPress") == .orderedSame }
+        case .setValue:
+            guard elementEnabled == true,
+                  element.semanticLabel != nil,
+                  affirmativelyBenign,
+                  isOrdinaryEditableRole(role) else { return false }
+            // AXValue is a settable accessibility attribute, not an action.
+            // AppKit text fields commonly advertise AXConfirm/AXShowMenu only;
+            // execution still verifies that AXValue is settable and fails
+            // closed when it is not.
+            return true
+        case .typeText, .paste:
+            guard elementEnabled == true,
+                  element.semanticLabel != nil,
+                  affirmativelyBenign,
+                  isOrdinaryTextRole(role) else { return false }
+            return true
         case .performSecondaryAction:
             guard let requestedAction else { return false }
             let allowed = Set(["axshowmenu", "axraise"])
@@ -2899,6 +3076,25 @@ public enum RiskClassifier {
         default:
             return false
         }
+    }
+
+    private static func isOrdinaryTextRole(_ role: String) -> Bool {
+        ["axtextfield", "axtextarea", "axsearchfield", "axcombobox"].contains(role)
+    }
+
+    private static func isOrdinaryEditableRole(_ role: String) -> Bool {
+        isOrdinaryTextRole(role) || ["axslider", "axcheckbox", "axpopupbutton"].contains(role)
+    }
+
+    private static func isBenignNavigationKey(_ key: String?, modifiers: [String]) -> Bool {
+        guard modifiers.isEmpty else { return false }
+        let normalized = key?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return [
+            "tab", "escape", "esc",
+            "up", "arrow_up", "down", "arrow_down",
+            "left", "arrow_left", "right", "arrow_right",
+            "page_up", "pageup", "page_down", "pagedown", "home", "end",
+        ].contains(normalized)
     }
 
     private static func payloadLooksSensitive(_ payload: String) -> Bool {

@@ -43,6 +43,16 @@ Check the native connection without starting MCP framing:
 node /absolute/path/to/computer-use-mcp/packages/mcp/dist/index.js doctor
 ```
 
+The same executable can safely merge its stdio entry into a client config:
+
+```sh
+node /absolute/path/to/computer-use-mcp/packages/mcp/dist/index.js \
+  configure claude-desktop
+```
+
+Supported names are `claude-desktop`, `claude-code`, `cursor`, and `codex`.
+An optional second argument overrides the default configuration path.
+
 ## Client configuration
 
 ### Codex
@@ -93,12 +103,9 @@ claude mcp add --transport stdio --scope user computer-use -- \
   tree with an explicit `reset_reason`. Display state uses an explicit empty
   `full` tree because AX elements are window-scoped. Secure nodes are marked
   and never expose values.
-- Higher-risk actions use one challenge. Modern MCP clients receive form
-  elicitation; clients without that capability use the native approval panel
-  and retry the exact call with its one-shot `approval_request_id`.
-- Set `COMPUTER_USE_MCP_APPROVAL_MODE=native` to require the one-shot native
-  approval panel even when a client advertises form elicitation. The default is
-  `auto`.
+- The approved target grant authorizes actions within its capability set; the
+  host does not prompt before every action. Native risk classification remains
+  active for audit and hard-blocked targets.
 - Screenshots are PNG only, capped at 5 MiB decoded. Resource delivery expires
   after 60 seconds.
 
@@ -131,4 +138,6 @@ an ephemeral resource link. Logs and native helper diagnostics go to stderr.
 
 ## License
 
-Apache License 2.0. Copyright 2026 jmeguilos.
+Apache License 2.0. Copyright 2026 Jules Marvine (jmeguilos). See the bundled
+license and third-party notices for MIT-licensed adaptations and documentation
+acknowledgments.

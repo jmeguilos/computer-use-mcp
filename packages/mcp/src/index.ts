@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { installClientConfig, type SupportedClient } from "./client-config.js";
 import { collectDiagnostics, type DiagnosticsDependencies } from "./diagnostics.js";
 import { createComputerUseMcpServer, SERVER_VERSION } from "./server.js";
 
@@ -11,11 +14,30 @@ Usage:
   computer-use-mcp          Serve MCP over stdio
   computer-use-mcp setup    Wait boundedly for host readiness after local setup launches it
   computer-use-mcp doctor   Read-only host, bridge, runtime, and toolchain report
+  computer-use-mcp configure <claude-desktop|claude-code|cursor|codex> [path]
+                            Merge this server into a client configuration
   computer-use-mcp --help   Show this help
   computer-use-mcp --version
 `;
 
 type TextWriter = { write(value: string): unknown };
+
+const SUPPORTED_CLIENTS = new Set<SupportedClient>([
+  "claude-desktop",
+  "claude-code",
+  "cursor",
+  "codex"
+]);
+
+function defaultClientConfigPath(client: SupportedClient): string {
+  switch (client) {
+    case "claude-desktop":
+      return join(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+    case "claude-code": return resolve(".mcp.json");
+    case "cursor": return resolve(".cursor", "mcp.json");
+    case "codex": return join(homedir(), ".codex", "config.toml");
+  }
+}
 
 export type CliOptions = {
   stdout?: TextWriter;
@@ -86,6 +108,33 @@ export async function runCli(
     return 0;
   }
   if (command === "doctor" || command === "setup") return doctor(command, options);
+  if (command === "configure") {
+    const requested = arguments_[1];
+    if (!SUPPORTED_CLIENTS.has(requested as SupportedClient)) {
+      stderr.write(`Unsupported or missing client: ${requested ?? ""}\n${HELP}`);
+      return 2;
+    }
+    const client = requested as SupportedClient;
+    const entryPath = process.argv[1];
+    if (entryPath === undefined) {
+      stderr.write("Cannot resolve the computer-use-mcp executable path.\n");
+      return 1;
+    }
+    const path = arguments_[2] ?? defaultClientConfigPath(client);
+    try {
+      installClientConfig({
+        client,
+        path,
+        entry: { command: process.execPath, args: [resolve(entryPath)] }
+      });
+      stdout.write(`Configured computer-use-mcp for ${client} in ${resolve(path)}.\n`);
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown configuration error";
+      stderr.write(`Could not configure ${client}: ${message}\n`);
+      return 1;
+    }
+  }
   if (command !== undefined) {
     stderr.write(`Unknown command: ${command}\n${HELP}`);
     return 2;

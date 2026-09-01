@@ -239,6 +239,15 @@ export class ComputerUseMcpRuntime {
       async (_args, ctx) =>
         this.#safeResult(StatusOutputSchema, async () => {
           const native = asRecord(await this.#callNative("status", {}, ctx, 10_000));
+          const activeGrantIds = new Set(
+            Array.isArray(native.active_grants)
+              ? native.active_grants.flatMap(grant => {
+                  const id = asRecord(grant).grant_id;
+                  return typeof id === "string" ? [id] : [];
+                })
+              : []
+          );
+          this.#approvalRegistry.retainGrants(activeGrantIds);
           return {
             ...native,
             ok: true,
@@ -328,6 +337,7 @@ export class ComputerUseMcpRuntime {
           if (output["grant_id"] !== args.grant_id) {
             throw this.#protocolError("The native bridge released a different grant.");
           }
+          this.#approvalRegistry.revokeGrant(args.grant_id);
           return output;
         })
     );

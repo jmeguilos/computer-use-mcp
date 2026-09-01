@@ -27,7 +27,7 @@
     <key>LSUIElement</key>
     <true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Open source contributors</string>
+	<string>Copyright © 2026 Jules Marvine (jmeguilos)</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Allows this local host to capture a window or display only after you approve a separate MCP access request.</string>
 </dict>

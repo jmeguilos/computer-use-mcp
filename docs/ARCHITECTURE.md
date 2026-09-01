@@ -27,7 +27,7 @@ macOS work.
 - validates and normalizes every tool argument;
 - maps public tool calls to the versioned native bridge;
 - converts native images to MCP image content or short-lived resources;
-- binds one-shot approval request IDs to canonical action arguments;
+- preserves legacy one-shot approval fields for protocol compatibility;
 - maps native failures to stable, structured tool errors; and
 - writes protocol output only to stdout and diagnostics only to stderr.
 
@@ -71,7 +71,8 @@ invoking the genuine bridge. When no verified GUI ancestor is available, the hos
 keeps status and inventory readable but marks every application non-grantable and
 denies window and display requests before presenting native approval UI. Verified
 callers remain untrusted until native UI grants an exact target, and the host's
-connection-, grant-, frame-, and one-shot action checks remain authoritative.
+connection-, grant-, frame-, capability-, and protected-surface checks remain
+authoritative.
 
 ### Native macOS host
 
@@ -87,7 +88,7 @@ The native host owns:
 - Core Graphics event synthesis where a semantic action is unavailable;
 - Screen Recording and Accessibility status and onboarding;
 - durable fail-closed host preferences and the first-run/settings window;
-- target selection, grants, revocation, expiry, and risk approval;
+- target selection, grants, revocation, expiry, and risk classification;
 - the left-edge indicator and emergency Stop control;
 - protected-target policy and session-lock handling; and
 - privacy-preserving local audit metadata.
@@ -159,12 +160,13 @@ The window owns no target authority. It presents:
 - a persisted **General app access** master switch, off by default;
 - separate Screen Recording and Accessibility rows with refresh actions;
 - a source-development trust-boundary warning when applicable; and
-- remembered signed-app decisions with per-app Remove and confirmed Remove All.
+- requester-bound always-allowed signed-app policies with per-policy Remove and
+  confirmed Remove All.
 
 Turning General app access off persists the off state before Emergency Stop
 revokes active grants. A read or persistence error must leave the policy off.
 Turning it on only permits native access requests; it does not modify TCC, select
-a target, or activate remembered app authority.
+a target, or create ambient app authority.
 
 ## Permission and grant layers
 
@@ -175,7 +177,7 @@ There are four separate layers:
 | macOS TCC | Screen Recording, Accessibility | Application identity; system-defined | System Settings / MDM |
 | Native master policy | Permission to accept computer-use requests | This host, persisted; off by default | General app access switch |
 | Bridge connection | Named native protocol capabilities | One authenticated local client connection | Native host handshake |
-| Target grant | Observe, interact, clipboard write | Selected window; explicit display exception | Native approval UI |
+| Target grant | Observe, interact, clipboard write | Selected window; explicit display exception | Native approval UI or exact requester-bound saved policy |
 
 Passing one layer never bypasses another. In particular, macOS Screen Recording
 permission is system-wide for the app, while Computer Use MCP's window boundary
@@ -187,8 +189,10 @@ trust and public event-posting permission, not Input Monitoring.
 
 1. A client starts the MCP adapter and calls `computer_request_access` with an
    app selector, reason, and requested capabilities.
-2. The native host verifies that General app access is on and required TCC state
-   is present, presents its own target picker, and records the user's decision.
+2. The native host verifies that General app access and required TCC state are
+   present, resolves safe Accessibility-bound candidates, and either applies an
+   exact matching saved policy to one unique window or presents its target
+   picker. App launch remains a separate approval.
 3. A granted window is bound to its opaque window identifier, PID, bundle
    identifier, and signing identity when available. The connection receives
    an opaque `grant_id`, never an ambient host handle. Internal connection and
@@ -200,13 +204,17 @@ trust and public event-posting permission, not Input Monitoring.
    client disconnect, connection idle timeout, host exit, session lock, or
    policy revocation.
 
-`always_allow_app` remembers a native approval policy for a matching signed app;
-it does not preserve a bearer token or an unbounded live session. Every new
-connection still receives fresh opaque IDs and is subject to the master switch,
-current TCC, and target state. Remembering an app never selects a concrete
-window: every new grant requires an exact-window choice, including a sole or
-newly created window. Removing a remembered app affects future requests, not an
-already active grant.
+`always_allow_app` remembers a native approval policy keyed to both the verified
+requesting harness identity and the signed target application, plus the approved
+capability set. It does not preserve a bearer token or an unbounded live session.
+Every request still receives fresh connection-bound authority and is subject to
+the master switch, current TCC, protected-target policy, fresh Accessibility
+binding, target lock, and mandatory indicator. A later explicit request may skip
+the app prompt only when exactly one safe window matches and the requested
+capabilities are a subset of the saved policy. Multiple matches, changed signing
+identity, a different requester, or capability escalation opens the native
+picker. Legacy consent records are prompt-only and are never upgraded silently.
+Removing an always-allowed app affects future requests, not an active grant.
 
 A display grant follows the same master-policy and TCC checks, but is approved
 separately for one display, is session-only, has no Accessibility tree, and is
@@ -244,34 +252,24 @@ and operating-system version gates. The alpha has no universally supported
 private implementation; an unavailable path returns an error rather than
 downgrading target validation or silently choosing another private mechanism.
 
-Every action includes a short human-readable `intent`. The native risk engine
-classifies the normalized action:
+Every action includes a short human-readable `intent`. Native risk classification
+is retained for audit and hard-block policy, but the approved target grant is the
+authorization for low, medium, and high classifications. The host therefore
+does not interrupt an active grant with turn-by-turn prompts. Blocked actions are
+denied regardless of client request. Exact connection, grant, target identity,
+capability, current frame, semantic target, focus destination, and protected
+surface checks still run immediately before dispatch.
 
-- low risk may complete under the existing grant;
-- medium or high risk creates one native challenge and uses either modern MCP v2
-  `input_required` elicitation or the native-panel fallback;
-- blocked actions are denied regardless of client request.
-
-Modern MCP v2 clients can receive an `input_required` result containing an
-`elicitation/create` request. An accepted boolean and integrity-protected
-`requestState` let the authenticated adapter resolve that exact native challenge
-once. For a legacy or no-elicitation client, the host opens its native panel and
-returns `approval_required`; the client retries the exact call with a short-lived
-one-shot `approval_request_id`. Changed text, coordinates, modifiers, intent,
-frame, or grant fail with `APPROVAL_MISMATCH`. A challenge uses one route, never
-both prompts.
-
-The native fallback panel shows a bounded, escaped text/value preview only when
-the frame-bound Accessibility snapshot identifies one non-secure destination.
-Secure or ambiguous destinations show payload length and format with the preview
-hidden. Neither form is copied into audit metadata.
+The bridge retains the versioned approval request fields and one-shot challenge
+implementation for wire compatibility and explicit downstream policy forks.
+They are not selected by the shipped grant-scoped host.
 
 Secure text controls are write-only. Their title, label, value, and actions stay
 redacted from state, and selection remains denied. A direct
-`AXSecureTextField` may accept `computer_set_value` only after the action's
-high-risk one-shot approval has been consumed. `AXProtectedContent`, a generic
+`AXSecureTextField` may accept `computer_set_value` when the exact field is bound
+to the current approved grant and frame. `AXProtectedContent`, a generic
 element below a secure ancestor, or an ambiguous ancestry chain remains denied
-even with an approval token. An ancestry chain is accepted only when it reaches
+even within a grant. An ancestry chain is accepted only when it reaches
 the concrete `AXUIElement` for the granted application's PID; role text alone is
 not treated as proof of the root.
 

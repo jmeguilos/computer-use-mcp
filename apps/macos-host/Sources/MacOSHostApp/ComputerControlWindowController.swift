@@ -383,7 +383,7 @@ final class ComputerControlWindowController: NSWindowController, NSWindowDelegat
         let container = NSView()
         let spacer = NSView()
         checkAgainButton.bezelStyle = .rounded
-        checkAgainButton.setAccessibilityLabel("Check macOS permissions and remembered app access again")
+        checkAgainButton.setAccessibilityLabel("Check macOS permissions and always-allowed app access again")
         doneButton.bezelStyle = .rounded
         doneButton.keyEquivalent = "\r"
         doneButton.setAccessibilityLabel("Close Computer Use MCP Host settings")
@@ -607,12 +607,12 @@ private final class RememberedAppsView: NSView {
 
         removeAllButton.isEnabled = !apps.isEmpty
         removeAllButton.setAccessibilityHelp(
-            apps.isEmpty ? "There are no remembered app decisions." : "Removes every remembered app decision."
+            apps.isEmpty ? "There are no always-allowed apps." : "Removes every always-allowed app decision."
         )
 
         guard !apps.isEmpty else {
             let empty = wrappingLabel(
-                "No app identities are remembered. Every future request will require a fresh app decision and exact target choice."
+                "No apps are always allowed. Future app access requests will ask before creating an exact-window grant."
             )
             empty.font = .systemFont(ofSize: 12)
             empty.textColor = .secondaryLabelColor
@@ -638,10 +638,10 @@ private final class RememberedAppsView: NSView {
     }
 
     private func configure() {
-        let title = NSTextField(labelWithString: "Remembered app access")
+        let title = NSTextField(labelWithString: "Always-allowed apps")
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         let detail = wrappingLabel(
-            "Remembering an app never chooses a window automatically. Every new grant still requires an exact target."
+            "An explicit request may reuse approval only for the same requester and signed app when exactly one safe window matches. Ambiguous windows and sensitive actions still ask. Legacy prompt-only decisions are labeled below."
         )
         detail.font = .systemFont(ofSize: 12)
         detail.textColor = .secondaryLabelColor
@@ -650,7 +650,7 @@ private final class RememberedAppsView: NSView {
         removeAllButton.controlSize = .small
         removeAllButton.target = self
         removeAllButton.action = #selector(removeAllPressed)
-        removeAllButton.setAccessibilityLabel("Remove all remembered app access")
+        removeAllButton.setAccessibilityLabel("Remove all always-allowed app access")
 
         let titleRow = NSStackView(views: [title, NSView(), removeAllButton])
         titleRow.orientation = .horizontal
@@ -680,7 +680,7 @@ private final class RememberedAppsView: NSView {
             heading.widthAnchor.constraint(equalTo: stack.widthAnchor),
             rows.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
-        setAccessibilityLabel("Remembered app access")
+        setAccessibilityLabel("Always-allowed app access")
     }
 
     @objc private func removeAllPressed() {
@@ -717,7 +717,7 @@ private final class RememberedAppRow: InsetPanelView {
 
         let icon = symbolImageView(
             named: "app",
-            description: "Remembered application",
+            description: "Always-allowed application",
             pointSize: 18,
             weight: .regular
         )
@@ -745,7 +745,7 @@ private final class RememberedAppRow: InsetPanelView {
         removeButton.action = #selector(removePressed)
         removeButton.bezelStyle = .rounded
         removeButton.controlSize = .small
-        removeButton.setAccessibilityLabel("Remove remembered access for \(displayName)")
+        removeButton.setAccessibilityLabel("Remove always-allowed access for \(displayName)")
 
         addSubview(icon)
         addSubview(labels)

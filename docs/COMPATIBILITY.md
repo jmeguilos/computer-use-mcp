@@ -149,24 +149,17 @@ npx --yes @modelcontextprotocol/inspector@2.4.0 \
 
 Version `2.4.0` was the current registry version when this document was checked.
 Pinning it makes a diagnostic run repeatable. The Inspector does not replace the
-native target picker or risk approval UI.
+native target picker.
 
 Official source: [MCP SDK Inspector guidance](https://ts.sdk.modelcontextprotocol.io/v2/get-started/first-server).
 
 ## Clients without elicitation
 
-Elicitation is optional. A client needs only standard tool discovery/calls and
-image/resource result support:
+Elicitation is not required. A client needs only standard tool discovery/calls
+and image/resource result support. After native target access is granted, action
+calls run within that grant without an additional approval/retry exchange.
 
-1. call an action without `approval_request_id`;
-2. if it returns `status: "approval_required"`, tell the user to use the native
-   approval panel;
-3. after the user decides, retry the exact same tool and arguments with the
-   returned one-shot `approval_request_id`; and
-4. handle denial or expiry as a normal structured result.
-
-See [the complete retry example](../examples/no-elicitation-client.md). A client
-that cannot render MCP image content can request `screenshot: "resource"`; a
+A client that cannot render MCP image content can request `screenshot: "resource"`; a
 client with neither image nor resource support can request
 `screenshot: "none"` and use bounded Accessibility state.
 
@@ -176,7 +169,7 @@ client with neither image nor resource support can request
 | --- | --- |
 | Transport | launch a local stdio MCP server |
 | Tools | list and call tools with JSON objects |
-| Approvals | no MCP elicitation required; must pass structured retry token |
+| Approvals | native target grant; no MCP elicitation or action retry token required |
 | Images | recommended; resource or inline image content |
 | Timeouts | permit up to 300 seconds for access selection; actions cap at 30 seconds |
 | Cancellation | terminate/cancel cleanly; disconnect revokes the session |

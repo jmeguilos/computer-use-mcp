@@ -148,9 +148,12 @@ public struct AccessTargetPickerPresentation: Equatable, Sendable {
         if request.displayTarget {
             persistenceExplanation = "Session only. Display approval is never remembered."
         } else if request.appConsentExists {
-            persistenceExplanation = "App identity remembered. This approval still applies only to the exact window selected above."
+            persistenceExplanation =
+                "Always allowed for this requester and signed app. Choose the exact window for this request; " +
+                "the visible control rail and Stop button remain mandatory."
         } else {
-            persistenceExplanation = "Allow once, or remember this verified app identity. Every new window still requires an exact selection."
+            persistenceExplanation =
+                "Allow once, or always allow future explicit requests from this requester when exactly one safe window matches."
         }
 
         return AccessTargetPickerPresentation(
@@ -272,21 +275,11 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
     private let selectionLabel = NSTextField(labelWithString: "")
     private let clearSelectionButton = NSButton(title: "Clear Selection", target: nil, action: nil)
     private let persistenceStatus = NSTextField(labelWithString: "")
-    let rememberButton = NSButton(
-        checkboxWithTitle: "Remember this verified app identity for future requests",
-        target: nil,
-        action: nil
-    )
     var onSelectionChanged: ((Bool) -> Void)?
 
     var selectedIndex: Int? {
         let row = tableView.selectedRow
         return presentation.choices.indices.contains(row) ? row : nil
-    }
-
-    var selectedPersistence: GrantPersistence {
-        if presentation.isSessionOnly { return .sessionOnly }
-        return rememberButton.state == .on ? .alwaysAllowApp : .allowOnce
     }
 
     init(request: AccessApprovalRequest) {
@@ -361,8 +354,6 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
-
-    @objc private func persistenceChanged() { updatePersistence() }
 
     private func configure(tableHeight: CGFloat, contentHeight: CGFloat) {
         let scrollContainer = NSScrollView()
@@ -467,7 +458,6 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
 
         root.addArrangedSubview(persistenceView())
         updateSelection()
-        updatePersistence()
     }
 
     private func identityCard() -> NSView {
@@ -568,16 +558,8 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
         stack.alignment = .leading
         stack.spacing = 4
         stack.addArrangedSubview(heading)
-        if !presentation.isSessionOnly {
-            rememberButton.state = presentation.applicationAlreadyRemembered ? .on : .off
-            rememberButton.isEnabled = presentation.canRememberApplication
-            rememberButton.target = self
-            rememberButton.action = #selector(persistenceChanged)
-            rememberButton.setAccessibilityHelp(
-                "Remembering an app identity never selects or grants a new window automatically."
-            )
-            stack.addArrangedSubview(rememberButton)
-        }
+        persistenceStatus.stringValue = presentation.persistenceExplanation
+        persistenceStatus.setAccessibilityValue(persistenceStatus.stringValue)
         stack.addArrangedSubview(persistenceStatus)
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
@@ -586,7 +568,7 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
         card.setAccessibilityLabel("Access duration")
         NSLayoutConstraint.activate([
             card.widthAnchor.constraint(equalToConstant: 540),
-            card.heightAnchor.constraint(equalToConstant: presentation.isSessionOnly ? 54 : 76),
+            card.heightAnchor.constraint(equalToConstant: presentation.isSessionOnly ? 54 : 70),
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
             stack.centerYAnchor.constraint(equalTo: card.centerYAnchor),
@@ -605,17 +587,6 @@ final class NativeAccessTargetPickerView: NSView, NSTableViewDataSource, NSTable
     @objc private func clearSelection() {
         tableView.deselectAll(nil)
         updateSelection()
-    }
-
-    private func updatePersistence() {
-        if presentation.isSessionOnly {
-            persistenceStatus.stringValue = presentation.persistenceExplanation
-        } else if rememberButton.state == .on {
-            persistenceStatus.stringValue = "Remembered app identity; this grant remains limited to the selected exact window."
-        } else {
-            persistenceStatus.stringValue = "Allow once; revoked on Stop, disconnect, replacement, or inactivity."
-        }
-        persistenceStatus.setAccessibilityValue(persistenceStatus.stringValue)
     }
 
     private func roundedCard() -> NSView {

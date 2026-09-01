@@ -1,5 +1,15 @@
 # Third-party notices
 
+Computer Use MCP adapts computer-use workflow, client-integration, and testing
+ideas from [ifuryst/open-codex-computer-use](https://github.com/ifuryst/open-codex-computer-use)
+at revision
+`503a5e54c812cde33c2f986f6199d16f7171538f`, Copyright (c) 2026 Leo, under the
+MIT License reproduced in this package's `LICENSE` file.
+
+Its interface and safety guidance were also informed by Anthropic's public
+computer-use documentation. No Anthropic code, branding, or endorsement is
+included or implied.
+
 Computer Use MCP includes or depends on the following primary open-source
 packages. The dependency lockfile is the authoritative inventory for the
 specific build.

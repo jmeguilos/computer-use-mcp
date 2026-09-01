@@ -56,27 +56,31 @@ capabilities. Native UI then requires a concrete target choice:
 - a **display grant** is bound to one selected display, is session-only, and is
   never remembered.
 
-**Remember this verified app identity for future requests** is the persistent
-app choice. It remembers only the signed application identity and approved
-capability set; it never chooses a window. Every new grant, including for a
-remembered app with only one visible window, still requires an exact window
-choice. A new, recreated, or ambiguous window does not inherit authority.
+**Always Allow App** is the persistent app choice. It remembers the verified
+requesting harness identity, signed target application identity, and approved
+capability set. It never creates ambient authority: the harness must make a new
+explicit request, the host must resolve exactly one safe Accessibility-bound
+window, and the control rail must appear before a new connection-bound grant is
+published. Multiple matching windows, a changed requester or app signature, and
+capability escalation open the native picker again. Display requests remain
+session-only, and application launch has its own prompt.
 
-The settings window lists remembered applications. **Remove** deletes one
-remembered app decision and **Remove All** deletes all of them after confirmation.
+The settings window lists **Always-allowed apps**. **Remove** deletes one saved
+requester/app policy and **Remove All** deletes all of them after confirmation.
 Removal changes future requests; use Stop to end an already active exact-target
-grant.
+grant. Records created by an older build under the prompt-every-window wording
+remain prompt-only until a new explicit Always Allow decision is made.
 
 ## General app access
 
-The General app access switch is independent of both TCC and remembered apps:
+The General app access switch is independent of both TCC and always-allowed apps:
 
 - **Off** is the default and blocks computer-use operations that could expose or
   change another app. Turning it off immediately invokes Emergency Stop and
   revokes active grants.
 - **On** permits new native access requests but conveys no target authority by
   itself.
-- Turning the switch off does not delete remembered app identities. Remove them
+- Turning the switch off does not delete always-allowed app policies. Remove them
   separately if they should no longer be recognized on future requests.
 - A preference read or persistence failure must fail closed; the UI must not
   claim that control is enabled when the native policy could not persist it.
@@ -115,7 +119,7 @@ Open the host's menu-bar item and choose **Computer Control Settings…** to:
 - turn General app access on or off;
 - review Screen Recording and Accessibility separately;
 - refresh permission state with Check Again;
-- remove one or all remembered app decisions; or
+- remove one or all always-allowed app policies; or
 - use Emergency Stop before changing control policy.
 
 **Saved App Access…** is a shortcut to the same settings window, not a second

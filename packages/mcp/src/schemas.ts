@@ -317,6 +317,7 @@ const StatusSuccessSchema = z
     native_version: z.string().min(1),
     platform: z.literal("macos"),
     app_control_enabled: z.boolean(),
+    action_authorization: z.enum(["grant_scoped", "risk_based"]),
     permissions: z
       .object({
         accessibility: PermissionStateSchema,

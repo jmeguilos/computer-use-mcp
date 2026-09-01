@@ -4,6 +4,7 @@ import { stableJson, withoutApprovalRequest } from "./utils.js";
 type PendingApproval = {
   toolName: string;
   canonicalArguments: string;
+  grantId: string | undefined;
   expiresAtMs: number;
   consumed: boolean;
 };
@@ -29,6 +30,10 @@ export class ApprovalRegistry {
     this.#approvals.set(token, {
       toolName,
       canonicalArguments: stableJson(withoutApprovalRequest(argumentsWithDefaults)),
+      grantId:
+        typeof argumentsWithDefaults.grant_id === "string"
+          ? argumentsWithDefaults.grant_id
+          : undefined,
       expiresAtMs,
       consumed: false
     });
@@ -72,6 +77,20 @@ export class ApprovalRegistry {
   public pendingCount(): number {
     this.#prune();
     return [...this.#approvals.values()].filter(value => !value.consumed).length;
+  }
+
+  public revokeGrant(grantId: string): void {
+    for (const [token, approval] of this.#approvals) {
+      if (approval.grantId === grantId) this.#approvals.delete(token);
+    }
+  }
+
+  public retainGrants(activeGrantIds: ReadonlySet<string>): void {
+    for (const [token, approval] of this.#approvals) {
+      if (approval.grantId !== undefined && !activeGrantIds.has(approval.grantId)) {
+        this.#approvals.delete(token);
+      }
+    }
   }
 
   #prune(): void {

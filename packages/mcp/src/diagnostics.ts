@@ -36,6 +36,7 @@ const NativeStatusSchema = z
     native_version: z.string().min(1).max(256),
     platform: z.literal("macos"),
     app_control_enabled: z.boolean(),
+    action_authorization: z.enum(["grant_scoped", "risk_based"]),
     permissions: z
       .object({
         accessibility: z.enum(["authorized", "denied", "not_determined", "restricted"]),

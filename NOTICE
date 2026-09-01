@@ -1,5 +1,13 @@
 Computer Use MCP
-Copyright 2026 jmeguilos and contributors
+Copyright 2026 Jules Marvine (jmeguilos) and contributors
+
+Portions of the project's computer-use workflows and compatibility design are
+adapted from open-codex-computer-use, Copyright (c) 2026 Leo, under the MIT
+License. The complete notice is in THIRD_PARTY_NOTICES.md and LICENSE.
+
+The tool interface and safety documentation also draw on Anthropic's published
+computer-use documentation. Anthropic code, artwork, and branding are not part
+of this project. Anthropic does not endorse or sponsor this project.
 
 This product includes software developed for the Computer Use MCP project.
 
