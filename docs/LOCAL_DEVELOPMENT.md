@@ -106,7 +106,7 @@ npx --yes @modelcontextprotocol/inspector@2.4.0 \
 ```
 
 The Inspector is a development client, not the native permission surface. Access
-and target approvals still occur in Jules Marvine Computer Use. Do not enable the
+and target approvals still occur in Computer Use MCP Host. Do not enable the
 Inspector's broad tool auto-approval while testing action policy.
 
 ## Test matrix

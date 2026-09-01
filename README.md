@@ -57,7 +57,7 @@ Codex / Claude / Cursor / Inspector / another MCP host
                          |
        authenticated local Unix-domain socket
                          |
-           Jules Marvine Computer Use
+              Computer Use MCP Host
             /              |              \
  ScreenCaptureKit   Accessibility/CGEvent   left-edge indicator
 ```

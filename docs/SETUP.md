@@ -98,7 +98,7 @@ The host checks two permissions independently:
 2. **Accessibility** permits semantic inspection/actions and synthetic input.
 
 Open **System Settings → Privacy & Security**, select each category, and enable
-**Jules Marvine Computer Use** only if you intend to use that capability. macOS may
+**Computer Use MCP Host** only if you intend to use that capability. macOS may
 require quitting and reopening the host after Screen Recording changes. The host
 continues in a degraded state when only one permission is present and reports
 which tools remain unavailable.
@@ -265,7 +265,7 @@ settings state, and request a fresh exact target.
 ## Uninstall a source build
 
 1. press Stop and quit all MCP clients using the server;
-2. quit Jules Marvine Computer Use;
+2. quit Computer Use MCP Host;
 3. remove the development app created by `setup`;
 4. move `~/Library/Application Support/ComputerUseMCP` to Trash if you also want
    to remove settings and redacted audit metadata; and

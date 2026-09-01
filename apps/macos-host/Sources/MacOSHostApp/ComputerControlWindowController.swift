@@ -137,7 +137,7 @@ final class ComputerControlWindowController: NSWindowController, NSWindowDelegat
             backing: .buffered,
             defer: false
         )
-        window.title = "Jules Marvine Computer Use"
+        window.title = "Computer Use MCP Host"
         window.minSize = NSSize(width: 560, height: 520)
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
@@ -259,7 +259,7 @@ final class ComputerControlWindowController: NSWindowController, NSWindowDelegat
             contentStack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -24),
         ])
 
-        window?.setAccessibilityLabel("Jules Marvine Computer Use settings")
+        window?.setAccessibilityLabel("Computer Use MCP Host settings")
     }
 
     private func configureCallbacks() {
@@ -291,7 +291,7 @@ final class ComputerControlWindowController: NSWindowController, NSWindowDelegat
         )
         icon.contentTintColor = .controlAccentColor
 
-        let title = NSTextField(labelWithString: "Jules Marvine Computer Use")
+        let title = NSTextField(labelWithString: "Computer Use MCP Host")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         title.textColor = .labelColor
 
@@ -386,7 +386,7 @@ final class ComputerControlWindowController: NSWindowController, NSWindowDelegat
         checkAgainButton.setAccessibilityLabel("Check macOS permissions and always-allowed app access again")
         doneButton.bezelStyle = .rounded
         doneButton.keyEquivalent = "\r"
-        doneButton.setAccessibilityLabel("Close Jules Marvine Computer Use settings")
+        doneButton.setAccessibilityLabel("Close Computer Use MCP Host settings")
 
         let stack = NSStackView(views: [spacer, checkAgainButton, doneButton])
         stack.translatesAutoresizingMaskIntoConstraints = false

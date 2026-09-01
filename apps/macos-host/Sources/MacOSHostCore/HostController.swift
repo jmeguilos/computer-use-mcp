@@ -2348,7 +2348,7 @@ public actor HostController: HostMethodHandling {
         guard await controlPolicy.isAppControlEnabled() else {
             throw WireError(
                 code: "APP_CONTROL_DISABLED",
-                message: "General app access is off in Jules Marvine Computer Use settings"
+                message: "General app access is off in Computer Use MCP Host settings"
             )
         }
     }
