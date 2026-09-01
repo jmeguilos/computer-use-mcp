@@ -101,7 +101,6 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         let controller = HostController(
             controlPolicy: preferences,
             accessPresenter: NativeAccessApprovalPresenter(),
-            riskPresenter: NativeRiskApprovalPresenter(),
             indicator: indicator,
             stopToken: stopToken,
             auditStore: audit,
@@ -126,7 +125,7 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(
             systemSymbolName: "cursorarrow.rays",
-            accessibilityDescription: "Computer Use MCP Host"
+            accessibilityDescription: "Jules Marvine Computer Use"
         )
 
         let menu = NSMenu()
@@ -199,7 +198,7 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
-            title: "Quit Computer Use MCP Host",
+            title: "Quit Jules Marvine Computer Use",
             action: #selector(quit),
             keyEquivalent: "q"
         )
@@ -614,7 +613,7 @@ final class ComputerUseMCPHostApplication: NSObject, NSApplicationDelegate, NSMe
         }
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Computer Use MCP Host could not start"
+        alert.messageText = "Jules Marvine Computer Use could not start"
         alert.informativeText = message
         alert.addButton(withTitle: "Quit")
         alert.runModal()

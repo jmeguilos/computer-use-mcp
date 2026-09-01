@@ -9,18 +9,18 @@ making an action succeed.
 
 1. Read the [architecture](docs/ARCHITECTURE.md),
    [threat model](docs/THREAT_MODEL.md), and
-   [clean-room provenance policy](docs/PROVENANCE.md).
+   [source provenance policy](docs/PROVENANCE.md).
 2. Search existing issues and open a design issue for a new permission,
    persistent grant type, transport, private API, capture mode, or action class.
 3. Keep security reports private as described in [SECURITY.md](SECURITY.md).
 
 ## Provenance attestation
 
-By submitting a contribution, you attest that you have the right to license it
-under Apache-2.0 and that it was independently authored from permitted sources
-listed in the provenance policy. Do not submit copied application code,
-decompiled output, extracted binary resources, artwork, screenshots, protocol
-dumps containing private data, or generated code derived from such material.
+By submitting a contribution, you attest that you authored it or have the right
+to submit and redistribute it under compatible terms. Declare adapted source,
+retain required notices, and identify its immutable upstream revision. Do not
+submit decompiled output, extracted binary resources, unlicensed artwork,
+private-data dumps, credentials, or signing material.
 
 The pull-request template requires this attestation, and
 `npm run provenance:scan` enforces the mechanical part of the policy.

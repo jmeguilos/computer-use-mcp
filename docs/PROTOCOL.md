@@ -162,7 +162,7 @@ coordinate never overrides it.
 | `computer_press_key` | `key`, `modifiers` |
 | `computer_type_text` | `text`, `interval_ms` |
 | `computer_paste` | `text`, optional `format: "text"`; requires `clipboard_write` |
-| `computer_set_value` | element `selector`, `value`; a direct secure text field requires exact high-risk approval and remains unreadable |
+| `computer_set_value` | element `selector`, `value`; a direct secure text field must be exactly bound to the current grant/frame and remains unreadable |
 | `computer_select_text` | element `selector`, `text`, optional `prefix`/`suffix`, `selection_type` |
 | `computer_perform_secondary_action` | element `selector`, named `action` |
 
@@ -186,8 +186,8 @@ material target or transform change; the client must call `computer_get_state`
 again.
 
 A completed action returns `grant_id`, current target metadata, `action_id`, and
-completion time. `approval_required` returns only its one-shot
-`approval_request_id`, message, and expiry; it does not create a second grant.
+completion time. Once access is granted, ordinary actions do not require an
+additional approval round trip.
 
 ### Conservative tool annotations
 
@@ -197,51 +197,32 @@ potentially destructive and open-world. Client approval settings are useful
 defense in depth, but native grants remain mandatory even if a harness
 auto-approves MCP tools.
 
-## Approval: modern elicitation and native fallback
+## Grant-scoped authorization
 
-Risk classification and the one-shot challenge live in the native host. One
-challenge uses exactly one of two user-experience routes.
+`computer_request_access` is the user approval boundary. The native picker binds
+the selected window or display, requesting harness identity, target signing
+identity, capabilities, connection, and lifetime into an opaque grant. Every
+subsequent action must present that grant and a current frame. No MCP elicitation
+or native per-action panel is required.
 
-For a client negotiating the modern 2026 MCP protocol and input-required
-support, the server returns an `input_required` result containing one
-`elicitation/create` request. The client obtains an accepted boolean and retries
-with the byte-exact, integrity-protected opaque `requestState`. The authenticated
-adapter validates that state, resolves the matching native challenge once, and
-executes only the canonically identical action. A rejected elicitation is final.
-This route treats the MCP client as the user-facing approval mediator; clients
-that are not trusted to render and relay that decision should set
-`COMPUTER_USE_MCP_APPROVAL_MODE=native` in the server environment to force the
-native fallback instead.
+Risk classification remains part of native audit and hard-block enforcement.
+Protected processes, authorization/security UI, administrator prompts,
+self-control, protected Accessibility content, and out-of-grant destinations
+remain denied. Stop, disconnect, inactivity, target recreation, and permission
+loss revoke the authorization.
 
-Legacy clients and clients without elicitation use the native-panel fallback.
-The first call returns a complete tool result:
+`approval_request_id` remains accepted as a reserved legacy field so older
+clients do not fail schema validation. The default host does not issue new
+one-shot approval challenges.
 
-```json
-{
-  "ok": true,
-  "status": "approval_required",
-  "approval_request_id": "opaque-one-shot-request-id",
-  "message": "Approve this exact action in Computer Use MCP Host",
-  "expires_at": "2026-08-30T04:00:00Z"
-}
-```
-
-The client should wait for the user to decide in the native panel, then retry the
-same tool with identical normalized arguments plus `approval_request_id`. The ID
-is connection-, grant-, frame-, tool-, and argument-bound, expires quickly, and
-is consumed once. A changed retry returns `APPROVAL_MISMATCH`; reuse returns
-`APPROVAL_USED`. Denial is final.
-
-Clients that cannot automatically retry can simply issue the same tool call in a
-new model step. They do not need a special MCP capability. The server never opens
-both an MCP elicitation and native panel for the same challenge. See the
-[no-elicitation example](../examples/no-elicitation-client.md).
+`computer_get_status` reports `action_authorization: "grant_scoped"` for the
+shipped policy so harnesses and diagnostics can verify that behavior directly.
 
 ## Success, denial, and errors
 
 An operation that reached policy returns `ok: true` even when the user denies it;
-the `status` communicates `denied`, `pending`, `permission_required`,
-`approval_required`, or `completed`. A validation, transport, or execution
+the `status` communicates `denied`, `pending`, `permission_required`, or
+`completed`. A validation, transport, or execution
 failure returns:
 
 ```json

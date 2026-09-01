@@ -2,6 +2,7 @@
   "name": "@jmeguilos/computer-use-mcp",
   "version": "0.1.0-alpha.1",
   "description": "A local, window-scoped macOS computer-use MCP server",
+  "author": "Jules Marvine (jmeguilos)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

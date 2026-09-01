@@ -3586,6 +3586,105 @@ private actor FixtureWireHandler: HostMethodHandling {
 
 @Suite("Secure value-write approval dispatch")
 struct SecureValueWriteApprovalDispatchTests {
+    @Test func defaultGrantScopedPolicyDispatchesHighRiskWriteWithoutActionPrompt() async throws {
+        let window = try makeWindow(
+            id: 9_881,
+            bundle: "com.example.grant-scoped-fixture",
+            title: "Grant Scoped Fixture"
+        )
+        let accessibility = SecureWriteAccessibilityFixture()
+        let controller = HostController(
+            capture: try SecureWriteCaptureFixture(window: window),
+            accessibility: accessibility,
+            permissions: GrantedPermissionFixture(),
+            syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
+            accessPresenter: LaunchAcceptingPresenterFixture()
+        )
+        let now = Date()
+        let connection = ConnectionRecord(
+            id: UUID(),
+            capabilityToken: String(repeating: "g", count: 43),
+            peer: verifiedTestHarnessPeer(
+                processID: 9_880,
+                name: "grant-scoped-test-harness",
+                instanceID: "grant-scoped-test"
+            ),
+            capabilities: Set(HostCapability.allCases),
+            openedAt: now,
+            lastActivityAt: now,
+            idleTimeout: 900
+        )
+        func context(_ requestID: String) -> HostRequestContext {
+            HostRequestContext(
+                requestID: requestID,
+                connection: connection,
+                deadline: Date().addingTimeInterval(10)
+            )
+        }
+
+        let access = try await controller.handle(
+            method: "requestAccess",
+            params: .object([
+                "target": .object([
+                    "kind": .string("window"),
+                    "app": .object([
+                        "kind": .string("bundle_id"),
+                        "value": .string(window.identity.bundleIdentifier),
+                    ]),
+                    "launchIfNeeded": .bool(false),
+                ]),
+                "reason": .string("Test grant-scoped action authorization"),
+                "capabilities": .array([.string("observe"), .string("interact")]),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("grant-scoped-access")
+        )
+        let grantID = try #require(
+            access.objectValue?["grantId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+        let state = try await controller.handle(
+            method: "getState",
+            params: .object([
+                "grantId": .string(grantID.uuidString),
+                "screenshot": .string("none"),
+                "maxWidthPx": .number(1_024),
+                "includeAccessibility": .bool(true),
+                "maxAccessibilityChars": .number(10_000),
+                "timeoutMs": .number(5_000),
+            ]),
+            context: context("grant-scoped-state")
+        )
+        let frameID = try #require(
+            state.objectValue?["frameId"]?.stringValue.flatMap(UUID.init(uuidString:))
+        )
+        let completed = try await controller.handle(
+            method: "action",
+            params: .object([
+                "kind": .string("setValue"),
+                "grantId": .string(grantID.uuidString),
+                "frameId": .string(frameID.uuidString),
+                "intent": .string("Fill the exact secure fixture field"),
+                "approvalMode": .string("elicitation"),
+                "timeoutMs": .number(5_000),
+                "selector": .object([
+                    "kind": .string("element"),
+                    "elementId": .string("element-1"),
+                ]),
+                "value": .string("grant-authorized-value"),
+            ]),
+            context: context("grant-scoped-action")
+        )
+
+        #expect(completed.objectValue?["status"] == .string("completed"))
+        #expect(await accessibility.performedCommands() == [
+            .setValue(
+                nodeID: 1,
+                value: "grant-authorized-value",
+                authorization: .approvedDirectSecure
+            ),
+        ])
+    }
+
     @Test func exactApprovedRetryDispatchesOnlyTheApprovedSecureWrite() async throws {
         let window = try makeWindow(
             id: 9_901,
@@ -3597,6 +3696,7 @@ struct SecureValueWriteApprovalDispatchTests {
         let controller = HostController(
             capture: capture,
             accessibility: accessibility,
+            actionApprovalPolicy: .riskBased,
             permissions: GrantedPermissionFixture(),
             syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
             accessPresenter: LaunchAcceptingPresenterFixture()
@@ -3941,6 +4041,7 @@ struct SecureValueWriteApprovalDispatchTests {
             let controller = HostController(
                 capture: try SecureWriteCaptureFixture(window: window),
                 accessibility: accessibility,
+                actionApprovalPolicy: .riskBased,
                 permissions: GrantedPermissionFixture(),
                 syntheticDestinationGuard: ApprovedSecureWriteDestinationFixture(),
                 accessPresenter: LaunchAcceptingPresenterFixture()

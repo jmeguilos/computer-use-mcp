@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Computer Use MCP Host</string>
+    <string>Jules Marvine Computer Use</string>
     <key>CFBundleExecutable</key>
     <string>ComputerUseMCPHost</string>
     <key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Computer Use MCP Host</string>
+    <string>Jules Marvine Computer Use</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -27,7 +27,7 @@
     <key>LSUIElement</key>
     <true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Open source contributors</string>
+	<string>Copyright © 2026 Jules Marvine (jmeguilos)</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Allows this local host to capture a window or display only after you approve a separate MCP access request.</string>
 </dict>

@@ -36,9 +36,9 @@ other stdio-capable MCP host.
 - The native host uses public ScreenCaptureKit, Accessibility, and Core Graphics
   APIs. The optional targeted private-driver path is disabled by default,
   version-gated, and fails closed when unavailable.
-- Risk classification and one-shot challenge binding live in the native host.
-  Modern clients collect the user's decision through MCP elicitation; clients
-  without elicitation use the native approval panel.
+- The native access grant is the action authorization: approve the target and
+  capabilities once, then operate without a prompt before every click or key.
+  Risk classification remains active for audit and hard-blocked system targets.
 - Screenshots and typed text are not written to the audit log. See
   [Privacy](PRIVACY.md) for the exact defaults.
 
@@ -57,7 +57,7 @@ Codex / Claude / Cursor / Inspector / another MCP host
                          |
        authenticated local Unix-domain socket
                          |
-              Computer Use MCP Host.app
+           Jules Marvine Computer Use
             /              |              \
  ScreenCaptureKit   Accessibility/CGEvent   left-edge indicator
 ```
@@ -76,8 +76,8 @@ which same-user harness invoked that bridge. The bridge ignores caller-supplied
 names and instance IDs and derives requester attribution from the nearest
 verifiable GUI process ancestor, binding its PID, bundle ID, signing identity,
 and process generation. That attribution describes observed process ancestry;
-it is not caller authorization. Exact native target consent and risk-based
-action approval remain mandatory for every caller.
+it is not caller authorization. Exact native target consent and grant
+capability checks remain mandatory for every caller.
 
 Read [Architecture](docs/ARCHITECTURE.md), [Protocol](docs/PROTOCOL.md), and the
 [Threat model](docs/THREAT_MODEL.md) before extending the control surface.
@@ -134,6 +134,19 @@ Current, copyable configurations are in [Client compatibility](docs/COMPATIBILIT
 and [`examples/`](examples/). Those instructions were last checked against each
 vendor's official documentation on 2026-08-29.
 
+The source-built CLI can also merge an idempotent entry without replacing other
+client settings:
+
+```sh
+node packages/mcp/dist/index.js configure claude-desktop
+node packages/mcp/dist/index.js configure claude-code
+node packages/mcp/dist/index.js configure cursor
+node packages/mcp/dist/index.js configure codex
+```
+
+Pass an explicit config path as the second argument to override the documented
+default. Invalid JSON or duplicate managed Codex TOML sections fail closed.
+
 ## Safety model in one minute
 
 1. The client starts the stdio adapter.
@@ -147,8 +160,8 @@ vendor's official documentation on 2026-08-29.
    release replacements, but any same-user program can launch the genuine bridge
    and request a connection. This alpha's ad-hoc-signed source-development mode
    also permits same-user direct peers. In both modes, the caller remains
-   untrusted until the native host grants an exact target and, when required, one
-   exact action. On the normal bridge path, caller-provided names and instance IDs
+   untrusted until the native host grants an exact target and capability set.
+   On the normal bridge path, caller-provided names and instance IDs
    are discarded; the bridge attributes the request to the nearest verifiable GUI
    process ancestor, or reports **Unidentified local MCP harness** when it cannot
    derive one. An unidentified harness may inspect status and inventory, but all
@@ -166,7 +179,9 @@ vendor's official documentation on 2026-08-29.
    has its own approval. A separately requested display is session-only and can
    never be remembered, and older prompt-every-window records are not upgraded.
 5. The host binds a grant to the connection and selected target identity. It
-   revalidates that identity before every capture and action.
+   revalidates that identity before every capture and action. Actions covered by
+   the grant do not open additional approval prompts; protected processes,
+   administrator/security surfaces, and self-control remain blocked.
 6. The indicator stays visible while a grant is active. Stop, window closure,
    target replacement, session lock, timeout, or client disconnect revokes it.
 
@@ -198,7 +213,7 @@ an explicitly protected release environment. See [Releasing](docs/RELEASING.md).
 
 ## Contributing and security
 
-Contributions must satisfy the [clean-room provenance policy](docs/PROVENANCE.md)
+Contributions must satisfy the [source provenance policy](docs/PROVENANCE.md)
 and pass the automated provenance gate. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
 before opening a pull request.
 
@@ -207,9 +222,13 @@ instead.
 
 ## License
 
-Copyright 2026 jmeguilos and contributors. Licensed under the
+Copyright 2026 Jules Marvine (jmeguilos) and contributors. Licensed under the
 [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) and
 [third-party notices](THIRD_PARTY_NOTICES.md).
+
+This project includes acknowledged MIT-licensed adaptations and is informed by
+Anthropic's public computer-use documentation. Exact provenance and license
+notices are recorded in [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Apple, Anthropic, Claude, Cursor, OpenAI, and Codex are trademarks of their
 respective owners. This independent project is not endorsed by or affiliated

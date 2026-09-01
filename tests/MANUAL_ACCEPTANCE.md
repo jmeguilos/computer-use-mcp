@@ -81,7 +81,7 @@ Record the installed version and result for each current client:
 | Claude Desktop or Claude Code | stdio MCP configuration and its advertised approval route |
 | Cursor | stdio MCP configuration and its advertised approval route |
 | MCP Inspector | interactive stdio tool calls and its advertised approval route |
-| Minimal no-elicitation client | native one-shot approval/retry fallback |
+| Minimal no-elicitation client | grant-scoped action flow without elicitation |
 
 For every row, complete this sequence on a fresh MCP connection:
 

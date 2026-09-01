@@ -18,15 +18,14 @@ npm run doctor
 | `claude-code.mcp.json` | example project-root `.mcp.json` |
 | `cursor-mcp.json` | example `.cursor/mcp.json` or `~/.cursor/mcp.json` |
 | `mcp-inspector.sh` | launch pinned MCP Inspector against the local build |
-| `no-elicitation-client.md` | approval retry pattern for older/minimal clients |
+| `no-elicitation-client.md` | grant-scoped flow for older/minimal clients |
 
 Do not paste one JSON file over an existing configuration; merge its
 `mcpServers` member. Do not place secrets or signing credentials in MCP client
 configuration. The server needs no network API key.
 
-Client approval should remain enabled for action tools. The native grant/risk
-layer remains mandatory even when a client is configured to auto-run tools, but
-the two layers protect against different failures.
+Client approval settings remain useful defense in depth. The native target grant
+and hard-block layer remains mandatory even when a client auto-runs tools.
 
 See [the compatibility guide](../docs/COMPATIBILITY.md) for verified locations,
 CLI commands, policy notes, and official documentation links.

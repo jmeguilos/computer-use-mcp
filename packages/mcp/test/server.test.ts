@@ -194,6 +194,7 @@ class FakeBridge implements NativeBridge {
         nativeVersion: "0.1.0-alpha.1",
         platform: "macos",
         appControlEnabled: true,
+        actionAuthorization: "grant_scoped",
         permissions: { accessibility: "authorized", screenRecording: "authorized" },
         activeGrants: []
       };

@@ -528,7 +528,7 @@ public enum ElementClickFallbackPolicy {
         error == .actionUnsupported
     }
 
-    /// Approval and risk classification were bound to this descriptor before
+    /// Frame authority and risk classification were bound to this descriptor before
     /// execution. Reordering an action list is harmless; all semantic fields
     /// and the frame must otherwise remain exactly the same.
     public static func isSameBoundTarget(
@@ -599,6 +599,7 @@ public actor HostController: HostMethodHandling {
     private let locks: ControllerLockStore
     private let actionGate: ActionExecutionGate
     private let risks: RiskApprovalStore
+    private let actionApprovalPolicy: ActionApprovalPolicy
     private let permissions: SystemPermissionChecking
     private let controlPolicy: HostControlPolicyChecking
     private let protectedPolicy: ProtectedProcessPolicy
@@ -628,6 +629,7 @@ public actor HostController: HostMethodHandling {
         locks: ControllerLockStore = ControllerLockStore(),
         actionGate: ActionExecutionGate = ActionExecutionGate(),
         risks: RiskApprovalStore = RiskApprovalStore(),
+        actionApprovalPolicy: ActionApprovalPolicy = .grantScoped,
         permissions: SystemPermissionChecking = MacSystemPermissionChecker(),
         controlPolicy: HostControlPolicyChecking = AlwaysEnabledHostControlPolicy(),
         protectedPolicy: ProtectedProcessPolicy = ProtectedProcessPolicy(),
@@ -653,6 +655,7 @@ public actor HostController: HostMethodHandling {
         self.locks = locks
         self.actionGate = actionGate
         self.risks = risks
+        self.actionApprovalPolicy = actionApprovalPolicy
         self.permissions = permissions
         self.controlPolicy = controlPolicy
         self.protectedPolicy = protectedPolicy
@@ -861,6 +864,7 @@ public actor HostController: HostMethodHandling {
             "nativeVersion": .string("0.1.0-alpha.1"),
             "platform": .string("macos"),
             "appControlEnabled": .bool(appControlEnabled),
+            "actionAuthorization": .string(actionApprovalPolicy.rawValue),
             "permissions": .object([
                 "accessibility": .string(snapshot.accessibility.publicName),
                 "screenRecording": .string(snapshot.screenCapture.publicName),
@@ -1120,7 +1124,7 @@ public actor HostController: HostMethodHandling {
         // Always Allow App can satisfy only a later explicit request that has
         // already resolved to one safe, Accessibility-bound exact window. It
         // never grants ambient app authority, selects among multiple windows,
-        // covers displays, or bypasses the later per-action risk boundary.
+        // covers displays, or widens the capability ceiling.
         let decision: AccessApprovalDecision
         if appConsentExists, choices.count == 1, !isDisplay {
             decision = AccessApprovalDecision(
@@ -1541,9 +1545,10 @@ public actor HostController: HostMethodHandling {
                 element: elementDescriptor,
                 elementEnabled: elementEnabled
             )
-            // The one-shot approval is bound to both the wire action and the
-            // resolved semantic target. A relabelled/replaced control cannot
-            // consume approval issued for the earlier frame semantics.
+            // The action digest binds the wire action to its resolved semantic
+            // target for audit, frame checks, and the optional legacy risk-based
+            // policy. A relabelled/replaced control cannot reuse earlier frame
+            // semantics.
             let bindsFocusedElementFrame = request.selector == nil
                 && (request.text != nil || request.value != nil)
             let digest = try actionDigest(
@@ -1565,7 +1570,10 @@ public actor HostController: HostMethodHandling {
             let mapped = WireErrorMapping.map(error)
             let result: AuditResult
             if mapped.code == "CANCELLED" { result = .canceled }
-            else if mapped.code == "approval_required" || mapped.code.hasPrefix("APPROVAL_") || mapped.code == "ACCESS_DENIED" {
+            else if mapped.code == "approval_required"
+                || mapped.code.hasPrefix("APPROVAL_")
+                || mapped.code == "ACCESS_DENIED"
+                || mapped.code == "action_blocked" {
                 result = .denied
             } else { result = .failed }
             do {
@@ -1596,14 +1604,22 @@ public actor HostController: HostMethodHandling {
         frame: FrameResource,
         grant: AccessGrant
     ) async throws -> JSONValue {
-        let approvalSummary = RiskApprovalSummaryBuilder.summary(
-            request: request,
-            target: grantMetadata[grant.id]?.target ?? .object([:]),
-            harnessName: context.connection.peer.name,
-            element: elementDescriptor
-        )
-        var approvalConsumed = false
-        if riskTier > .low {
+        if riskTier == .blocked {
+            throw WireError(code: "action_blocked", message: "Action is blocked by host safety policy")
+        }
+
+        // A grant-scoped session is the user's authorization for every
+        // capability approved in the native picker. This avoids interrupting
+        // the user before each action while keeping target, frame, capability,
+        // process-identity, protected-surface, and Stop checks in force.
+        var sensitiveWriteAuthorized = actionApprovalPolicy == .grantScoped
+        if actionApprovalPolicy == .riskBased, riskTier > .low {
+            let approvalSummary = RiskApprovalSummaryBuilder.summary(
+                request: request,
+                target: grantMetadata[grant.id]?.target ?? .object([:]),
+                harnessName: context.connection.peer.name,
+                element: elementDescriptor
+            )
             if let approvalID = request.approvalRequestID {
                 guard await risks.consumeApproved(
                     approvalRequestID: approvalID,
@@ -1611,7 +1627,7 @@ public actor HostController: HostMethodHandling {
                     actionDigest: digest,
                     approvalMode: request.approvalMode
                 ) else { throw WireError(code: "approval_invalid", message: "Approval is expired, mismatched or consumed") }
-                approvalConsumed = true
+                sensitiveWriteAuthorized = true
             } else {
                 let authorization = await risks.authorize(
                     connectionID: context.connection.id,
@@ -1714,7 +1730,7 @@ public actor HostController: HostMethodHandling {
         }
         let relayedCancellation = RelayedInteractionCancellation(base: actionCancellation)
         do {
-            // Approval can outlive the frame it described. Once both the
+            // A grant can outlive the frame it described. Once both the
             // per-grant and global-input leases are held, require that exact
             // frame to still be current before any semantic re-resolution or
             // dispatch. getState uses the same per-grant lease.
@@ -1730,7 +1746,7 @@ public actor HostController: HostMethodHandling {
                     grant: grant,
                     frame: frame,
                     expectedSemanticTarget: elementDescriptor,
-                    approvalConsumed: approvalConsumed,
+                    sensitiveWriteAuthorized: sensitiveWriteAuthorized,
                     context: context,
                     cancellation: relayedCancellation
                 )
@@ -1790,7 +1806,7 @@ public actor HostController: HostMethodHandling {
         grant: AccessGrant,
         frame: FrameResource,
         expectedSemanticTarget: AccessibilityActionDescriptor?,
-        approvalConsumed: Bool,
+        sensitiveWriteAuthorized: Bool,
         context: HostRequestContext,
         cancellation baseCancellation: InteractionCancellationChecking
     ) async throws {
@@ -1800,9 +1816,9 @@ public actor HostController: HostMethodHandling {
         )
         try check(context)
         try cancellation.check()
-        // Approval can remain open while the target changes. Revalidate after
-        // approval and immediately before dispatch, not only when the request
-        // first enters the action pipeline.
+        // A grant can remain open while the target changes. Revalidate
+        // immediately before dispatch, not only when the request first enters
+        // the action pipeline.
         try await revalidate(grant: grant, frame: frame)
         if case .window = grant.scope,
            frame.accessibilityRevision != lastAccessibilityRevision[grant.id] {
@@ -1896,7 +1912,7 @@ public actor HostController: HostMethodHandling {
                         } catch let error as AccessibilityError where
                             ElementClickFallbackPolicy.permitsFallback(after: error) {
                             // Continue into the same action's frame-, grant-,
-                            // risk-, and approval-bound public fallback.
+                            // risk-, and semantic-target-bound public fallback.
                         }
                     }
                     try await clickElementCoordinateFallback(
@@ -2070,11 +2086,11 @@ public actor HostController: HostMethodHandling {
                 if expectedSemanticTarget.secure {
                     // Secure descendants and protected content never inherit
                     // the direct-field exception. This fact comes from the
-                    // exact descriptor in the approved action digest.
+                    // exact descriptor bound into the action digest.
                     guard AccessibilityProjection.isDirectSecureTextField(
                         role: expectedSemanticTarget.role,
                         subrole: expectedSemanticTarget.subrole
-                    ), approvalConsumed else {
+                    ), sensitiveWriteAuthorized else {
                         throw AccessibilityError.secureElement
                     }
                     authorization = .approvedDirectSecure
@@ -2189,7 +2205,7 @@ public actor HostController: HostMethodHandling {
             try check(context)
             try cancellation.check()
             // Focus can change layout. Revalidate window geometry and the
-            // approval-bound AX element again immediately before CGEvent.
+            // frame-bound AX element again immediately before CGEvent.
             try await revalidate(grant: grant, frame: frame)
             let finalDescriptor = try await accessibility.describeActionTarget(
                 sessionID: grant.id,
@@ -2332,7 +2348,7 @@ public actor HostController: HostMethodHandling {
         guard await controlPolicy.isAppControlEnabled() else {
             throw WireError(
                 code: "APP_CONTROL_DISABLED",
-                message: "General app access is off in Computer Use MCP Host settings"
+                message: "General app access is off in Jules Marvine Computer Use settings"
             )
         }
     }

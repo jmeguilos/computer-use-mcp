@@ -27,7 +27,7 @@ macOS work.
 - validates and normalizes every tool argument;
 - maps public tool calls to the versioned native bridge;
 - converts native images to MCP image content or short-lived resources;
-- binds one-shot approval request IDs to canonical action arguments;
+- preserves legacy one-shot approval fields for protocol compatibility;
 - maps native failures to stable, structured tool errors; and
 - writes protocol output only to stdout and diagnostics only to stderr.
 
@@ -71,7 +71,8 @@ invoking the genuine bridge. When no verified GUI ancestor is available, the hos
 keeps status and inventory readable but marks every application non-grantable and
 denies window and display requests before presenting native approval UI. Verified
 callers remain untrusted until native UI grants an exact target, and the host's
-connection-, grant-, frame-, and one-shot action checks remain authoritative.
+connection-, grant-, frame-, capability-, and protected-surface checks remain
+authoritative.
 
 ### Native macOS host
 
@@ -87,7 +88,7 @@ The native host owns:
 - Core Graphics event synthesis where a semantic action is unavailable;
 - Screen Recording and Accessibility status and onboarding;
 - durable fail-closed host preferences and the first-run/settings window;
-- target selection, grants, revocation, expiry, and risk approval;
+- target selection, grants, revocation, expiry, and risk classification;
 - the left-edge indicator and emergency Stop control;
 - protected-target policy and session-lock handling; and
 - privacy-preserving local audit metadata.
@@ -251,34 +252,24 @@ and operating-system version gates. The alpha has no universally supported
 private implementation; an unavailable path returns an error rather than
 downgrading target validation or silently choosing another private mechanism.
 
-Every action includes a short human-readable `intent`. The native risk engine
-classifies the normalized action:
+Every action includes a short human-readable `intent`. Native risk classification
+is retained for audit and hard-block policy, but the approved target grant is the
+authorization for low, medium, and high classifications. The host therefore
+does not interrupt an active grant with turn-by-turn prompts. Blocked actions are
+denied regardless of client request. Exact connection, grant, target identity,
+capability, current frame, semantic target, focus destination, and protected
+surface checks still run immediately before dispatch.
 
-- low risk may complete under the existing grant;
-- medium or high risk creates one native challenge and uses either modern MCP v2
-  `input_required` elicitation or the native-panel fallback;
-- blocked actions are denied regardless of client request.
-
-Modern MCP v2 clients can receive an `input_required` result containing an
-`elicitation/create` request. An accepted boolean and integrity-protected
-`requestState` let the authenticated adapter resolve that exact native challenge
-once. For a legacy or no-elicitation client, the host opens its native panel and
-returns `approval_required`; the client retries the exact call with a short-lived
-one-shot `approval_request_id`. Changed text, coordinates, modifiers, intent,
-frame, or grant fail with `APPROVAL_MISMATCH`. A challenge uses one route, never
-both prompts.
-
-The native fallback panel shows a bounded, escaped text/value preview only when
-the frame-bound Accessibility snapshot identifies one non-secure destination.
-Secure or ambiguous destinations show payload length and format with the preview
-hidden. Neither form is copied into audit metadata.
+The bridge retains the versioned approval request fields and one-shot challenge
+implementation for wire compatibility and explicit downstream policy forks.
+They are not selected by the shipped grant-scoped host.
 
 Secure text controls are write-only. Their title, label, value, and actions stay
 redacted from state, and selection remains denied. A direct
-`AXSecureTextField` may accept `computer_set_value` only after the action's
-high-risk one-shot approval has been consumed. `AXProtectedContent`, a generic
+`AXSecureTextField` may accept `computer_set_value` when the exact field is bound
+to the current approved grant and frame. `AXProtectedContent`, a generic
 element below a secure ancestor, or an ambiguous ancestry chain remains denied
-even with an approval token. An ancestry chain is accepted only when it reaches
+even within a grant. An ancestry chain is accepted only when it reaches
 the concrete `AXUIElement` for the granted application's PID; role text alone is
 not treated as proof of the root.
 

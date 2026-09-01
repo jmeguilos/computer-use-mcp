@@ -154,6 +154,7 @@ describe("public schemas", () => {
       native_version: "0.1.0-alpha.1",
       platform: "macos",
       app_control_enabled: true,
+      action_authorization: "grant_scoped",
       permissions: { accessibility: "authorized", screen_recording: "authorized" },
       active_grants: [],
       pending_approvals: 0

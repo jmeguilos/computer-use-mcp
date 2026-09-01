@@ -2,7 +2,8 @@
   "name": "computer-use-mcp-workspace",
   "version": "0.1.0-alpha.1",
   "private": true,
-  "description": "Clean-room macOS computer control over local MCP",
+  "description": "Window-scoped macOS computer control over local MCP",
+  "author": "Jules Marvine (jmeguilos)",
   "license": "Apache-2.0",
   "type": "module",
   "workspaces": [
