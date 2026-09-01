@@ -1,5 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 // Conservative JSON/TOML merge patterns adapted from the MIT-licensed
 // open-codex-computer-use installer at revision 503a5e54c812cde33c2f986f6199d16f7171538f.
@@ -12,9 +22,44 @@ export type StdioEntry = {
   args: string[];
 };
 
+function readTextIfPresent(path: string): string | undefined {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return readFileSync(descriptor, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function atomicWrite(path: string, content: string): void {
+  const temporaryPath = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`
+  );
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600
+    );
+    writeFileSync(descriptor, content, "utf8");
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporaryPath, path);
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try { unlinkSync(temporaryPath); } catch {}
+    throw error;
+  }
+}
+
 function readObject(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const text = readFileSync(path, "utf8");
+  const text = readTextIfPresent(path) ?? "";
   if (text.trim() === "") return {};
   const value: unknown = JSON.parse(text);
   if (value === null || Array.isArray(value) || typeof value !== "object") {
@@ -105,10 +150,10 @@ export function installClientConfig(input: {
   const path = resolve(input.path);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   if (input.client === "codex") {
-    const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-    writeFileSync(path, mergeCodexConfig(existing, input.entry), { mode: 0o600 });
+    const existing = readTextIfPresent(path) ?? "";
+    atomicWrite(path, mergeCodexConfig(existing, input.entry));
     return;
   }
   const merged = mergeJSONClientConfig(readObject(path), input.entry);
-  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+  atomicWrite(path, `${JSON.stringify(merged, null, 2)}\n`);
 }

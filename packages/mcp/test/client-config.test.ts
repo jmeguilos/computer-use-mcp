@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,5 +57,17 @@ describe("client configuration installer", () => {
       mcpServers: { "computer-use-mcp": entry }
     });
     expect(readFileSync(join(directory, "unrelated"), "utf8")).toBe("preserved");
+  });
+
+  it("refuses to read through a symlinked configuration path", () => {
+    const directory = mkdtempSync(join(tmpdir(), "computer-use-client-config-"));
+    temporaryDirectories.push(directory);
+    const target = join(directory, "target.json");
+    const path = join(directory, "mcp.json");
+    writeFileSync(target, "sensitive-target");
+    symlinkSync(target, path);
+
+    expect(() => installClientConfig({ client: "cursor", path, entry })).toThrow();
+    expect(readFileSync(target, "utf8")).toBe("sensitive-target");
   });
 });
